@@ -339,4 +339,7 @@ async def get_database_overview(database: str = "", sample_size: int = 30) -> di
 
 if __name__ == "__main__":
     _log("starting (stdio)")
-    mcp.run(transport="stdio")
+    try:
+        mcp.run(transport="stdio")
+    except KeyboardInterrupt:
+        _log("stopped")
