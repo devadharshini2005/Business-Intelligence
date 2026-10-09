@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "actuvara-cosmos-db": {
+      "type": "stdio",
+      "command": ".venv/Scripts/python.exe",
+      "args": ["mcp_server.py"]
+    }
+  }
+}
