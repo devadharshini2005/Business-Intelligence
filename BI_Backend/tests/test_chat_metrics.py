@@ -54,3 +54,25 @@ def test_unknown_metric_rejected_and_tool_is_offered():
                                  inputSchema={"type": "object", "properties": {}})]
     offered = ChatAgent._openai_tool_specs(mcp_tools)
     assert "chart_metric" in {t["function"]["name"] for t in offered}
+
+
+class DaysBi(FakeBi):
+    def __init__(self):
+        self.seen = []
+
+    def overview(self, days):
+        self.seen.append(days)
+        return super().overview(days)
+
+
+def test_no_days_means_all_time():
+    for days in (0, None, -5):
+        bi = DaysBi()
+        rows, _, _, _, title = metric_rows(bi, "submissions_by_source", days)
+        assert bi.seen == [0] and title == "Submissions by source (all time)"
+
+
+def test_long_periods_are_not_capped_at_a_year():
+    bi = DaysBi()
+    title = metric_rows(bi, "submissions_by_source", 1000)[4]
+    assert bi.seen == [1000] and "last 1000 days" in title

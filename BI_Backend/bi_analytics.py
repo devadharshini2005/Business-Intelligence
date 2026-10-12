@@ -5,11 +5,13 @@ Every query here is a fixed find / aggregate pipeline built in this module
 
 Time windows use the creation time embedded in each document's ObjectId
 (`_id`), so they work the same for every collection, use the `_id` index and
-don't depend on how a collection names or types its date fields.
+don't depend on how a collection names or types its date fields. `days <= 0`
+means all time (no window).
 """
 from __future__ import annotations
 
 import datetime as dt
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from bson import ObjectId
@@ -19,6 +21,7 @@ from idp_flow import ATTENTION, SOURCES, IdpFlow
 SOURCE_COLLECTIONS = {src: cfg["collection"] for src, cfg in SOURCES.items()}
 SOURCE_NAMES = {"email": "Email", "webhook": "Webhook", "manual_upload": "Manual upload"}
 TREND_SCAN_CAP = 50_000  # max ids read per collection when $toDate isn't supported
+MAX_DAYS = 36_500  # longer windows are treated as all time
 
 
 def _window(days: int, now: dt.datetime | None = None) -> tuple[dt.datetime, dt.datetime, dt.datetime]:
@@ -28,11 +31,18 @@ def _window(days: int, now: dt.datetime | None = None) -> tuple[dt.datetime, dt.
     return start - dt.timedelta(days=days), start, now
 
 
-def _id_range(start: dt.datetime, end: dt.datetime | None = None) -> dict[str, Any]:
-    rng: dict[str, Any] = {"$gte": ObjectId.from_datetime(start)}
+def _start(days: int) -> dt.datetime | None:
+    """Start of the current `days`-long window, or None for all time."""
+    return _window(days)[1] if 0 < days <= MAX_DAYS else None
+
+
+def _id_range(start: dt.datetime | None, end: dt.datetime | None = None) -> dict[str, Any]:
+    rng: dict[str, Any] = {}
+    if start is not None:
+        rng["$gte"] = ObjectId.from_datetime(start)
     if end is not None:
         rng["$lt"] = ObjectId.from_datetime(end)
-    return {"_id": rng}
+    return {"_id": rng} if rng else {}
 
 
 def _pct_change(cur: float | None, prev: float | None) -> float | None:
@@ -48,7 +58,7 @@ class BiAnalytics:
         self.db = db
 
     # --- KPIs ----------------------------------------------------------------
-    def _period(self, start: dt.datetime, end: dt.datetime | None) -> dict[str, Any]:
+    def _period(self, start: dt.datetime | None, end: dt.datetime | None) -> dict[str, Any]:
         rng = _id_range(start, end)
         by_source = {src: self.db[coll].count_documents(rng) for src, coll in SOURCE_COLLECTIONS.items()}
         files = self.db.files.count_documents({**rng, "metadata.parent_ref_id": {"$exists": False}})
@@ -85,12 +95,12 @@ class BiAnalytics:
             "avg_confidence": round(conf, 3) if conf is not None else None,
         }
 
-    def _file_funnel(self, start: dt.datetime, files_received: int) -> list[dict[str, Any]]:
+    def _file_funnel(self, start: dt.datetime | None, files_received: int) -> list[dict[str, Any]]:
         """Files received in the window and how far they got. Every stage counts files, so
         each stage is a subset of the one before (a file can have several runs)."""
-        since = ObjectId.from_datetime(start)
+        file_ids = {"$gte": ObjectId.from_datetime(start)} if start is not None else {"$ne": None}
         rows = list(self.db.extraction_results.aggregate([
-            {"$match": {"file_id": {"$gte": since}}},  # runs of files created in the window
+            {"$match": {"file_id": file_ids}},  # runs of files created in the window
             {"$group": {"_id": "$file_id",
                         "completed": {"$max": {"$cond": [{"$eq": ["$status", "completed"]}, 1, 0]}},
                         "validated": {"$max": {"$cond": [{"$and": [{"$eq": ["$status", "completed"]},
@@ -108,6 +118,13 @@ class BiAnalytics:
         ]
 
     def overview(self, days: int = 30) -> dict[str, Any]:
+        if _start(days) is None:  # all time: there is no previous period to compare with
+            cur = self._period(None, None)
+            return {"days": 0, "from": None, "to": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "previous_from": None, "current": cur, "previous": None,
+                    "change_pct": {k: None for k in ("submissions", "files", "runs", "completed_runs", "failed_runs",
+                                                     "success_rate", "avg_processing_s", "avg_confidence")},
+                    "funnel": self._file_funnel(None, cur["files"])}
         prev_start, start, now = _window(days)
         cur = self._period(start, None)
         prev = self._period(prev_start, start)
@@ -136,8 +153,19 @@ class BiAnalytics:
                 out[day] = out.get(day, 0) + 1
             return out
 
+    def _first_created(self) -> dt.datetime | None:
+        """Creation time of the oldest submission or run, from its ObjectId."""
+        times = []
+        for coll in [*SOURCE_COLLECTIONS.values(), "extraction_results"]:
+            doc = self.db[coll].find_one({"_id": {"$type": "objectId"}}, {"_id": 1}, sort=[("_id", 1)])
+            if doc:
+                times.append(doc["_id"].generation_time)
+        return min(times, default=None)
+
     def trend(self, days: int = 30) -> dict[str, Any]:
         _, start, now = _window(days)
+        if _start(days) is None:  # all time: start at the first day with data
+            start = self._first_created() or now
         start = start.replace(hour=0, minute=0, second=0, microsecond=0)
         series = {src: self._daily_counts(coll, start) for src, coll in SOURCE_COLLECTIONS.items()}
         runs = self._daily_counts("extraction_results", start)
@@ -149,12 +177,12 @@ class BiAnalytics:
                          "runs": runs.get(key, 0)})
             day += dt.timedelta(days=1)
         peak = max(rows, key=lambda r: sum(r[s] for s in series), default=None)
-        return {"days": days, "sources": list(series), "rows": rows,
+        return {"days": days if _start(days) else 0, "sources": list(series), "rows": rows,
                 "peak": peak["date"] if peak and any(peak[s] for s in series) else None}
 
     # --- processes ------------------------------------------------------------
     def processes(self, days: int = 30, limit: int = 12) -> list[dict[str, Any]]:
-        _, start, _ = _window(days)
+        start = _start(days)
         rows = list(self.db.extraction_results.aggregate([
             {"$match": _id_range(start)},
             {"$group": {"_id": {"p": "$proccess_id", "s": "$status"}, "n": {"$sum": 1},
@@ -191,7 +219,7 @@ class BiAnalytics:
     # --- node hotspots --------------------------------------------------------
     def node_hotspots(self, days: int = 30, limit: int = 10) -> list[dict[str, Any]]:
         """Workflow nodes that most often fail, get rejected or wait for approval."""
-        _, start, _ = _window(days)
+        start = _start(days)
         rows = list(self.db.file_process_tracker.aggregate([
             {"$match": {**_id_range(start), "status": {"$in": sorted(ATTENTION)}}},
             {"$group": {"_id": {"node": "$node_id", "s": "$status"}, "n": {"$sum": 1},
@@ -223,22 +251,28 @@ class BiAnalytics:
 
     # --- collections ----------------------------------------------------------
     def collections(self) -> list[dict[str, Any]]:
-        out = []
-        for name in sorted(self.db.list_collection_names(), key=str.lower):
+        def count(name: str) -> dict[str, Any]:
             try:
-                n = self.db[name].estimated_document_count()
+                # Not estimated_document_count: on Cosmos DB vCore the count/collStats commands it relies on
+                # take 15-30 s per collection, while count_documents (an aggregation) returns in milliseconds.
+                n = self.db[name].count_documents({}, maxTimeMS=5000)
             except Exception:
                 n = None
-            out.append({"collection": name, "documents": n})
+            return {"collection": name, "documents": n}
+
+        names = sorted(self.db.list_collection_names(), key=str.lower)
+        with ThreadPoolExecutor(max_workers=16) as pool:  # one round trip each; run them side by side
+            out = list(pool.map(count, names))
         return sorted(out, key=lambda r: -(r["documents"] or 0))
 
 
 def metric_rows(bi: BiAnalytics, metric: str, days: int) -> tuple[
     list[dict[str, Any]], str, list[str], list[str], str
 ]:
-    """Return chart rows and labels for a fixed dashboard metric."""
-    days = max(1, min(int(days or 30), 365))
-    period = f"last {days} days"
+    """Return chart rows and labels for a fixed dashboard metric. days <= 0 (or None) means all time."""
+    days = int(days or 0)
+    days = days if 0 < days <= MAX_DAYS else 0
+    period = f"last {days} days" if days else "all time"
     if metric == "runs_by_status":
         statuses = bi.overview(days)["current"]["runs_by_status"]
         rows = [{"status": key, "runs": value} for key, value in statuses.items()]

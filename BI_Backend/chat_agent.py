@@ -65,6 +65,10 @@ For questions about a specific submission, file or run use the idp_* tools. For 
 use run_aggregate. If you are unsure of a field name or its type, check with infer_collection_schema or
 get_distinct_values before building a pipeline - do not assume. Dates are BSON dates unless a schema says otherwise.
 
+Time periods: answer over ALL the data unless the question names a period ("last 7 days", "this month", "in
+September", "yesterday"). Without one, do not add a date $match, pass days=0 to chart_metric and
+idp_find_submissions, and say the figure covers all time. Never pick a default window such as 30 or 365 days.
+
 Charts: for the common analytics - runs by status, runs by process, submissions by source, failing workflow nodes,
 submissions or runs per day - ALWAYS use chart_metric: its numbers come from the dashboard's tested queries and are
 labelled with real names. Use create_chart only for anything else.
@@ -127,7 +131,8 @@ def date_context(now: dt.datetime | None = None) -> str:
             "from this date, never from memory. Ready-made $match bounds for date fields:\n"
             f"{lines}\n"
             "Use these exact values (or compute from today the same way), and say the date range you used in the "
-            "answer, e.g. 'from 12 Sep 2026 to 12 Oct 2026'. For idp_find_submissions pass `days` instead.")
+            "answer, e.g. 'from 12 Sep 2026 to 12 Oct 2026'. For chart_metric and idp_find_submissions pass `days` "
+            "instead. Only filter by date when the question names a period; otherwise use all the data.")
 
 
 def _dates_in(value: Any) -> list[dt.datetime]:

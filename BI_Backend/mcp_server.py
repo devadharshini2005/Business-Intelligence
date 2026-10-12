@@ -343,11 +343,13 @@ async def get_database_overview(database: str = "", sample_size: int = 30) -> di
 async def chart_metric(
     metric: Literal["runs_by_status", "runs_by_process", "submissions_by_source", "failing_nodes",
                     "submissions_per_day", "runs_per_day"],
-    days: int,
     chart_type: Literal["bar", "hbar", "line", "pie", "doughnut", "table", "kpi"],
+    days: int = 0,
     title: str = "",
 ) -> dict[str, Any]:
-    """Return the dashboard's tested rows for a standard metric, ready to chart."""
+    """Return the dashboard's tested rows for a standard metric, ready to chart.
+    days: only data from the last N days (0 = all time, the default). Pass days only when the
+    question names a period."""
     try:
         rows, x_field, y_fields, series_names, default_title = metric_rows(
             BiAnalytics(_db().database()), metric, days
