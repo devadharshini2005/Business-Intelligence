@@ -8,8 +8,11 @@ how collections relate – and the documents themselves.
 Filters and pipelines are checked before they are sent: `$out` and `$merge` (the only ways a
 read can write) and server-side JavaScript (`$where`, `$function`, `$accumulator`) are rejected.
 
-Copilot is the AI; this server is only its toolbox. There is no HTTP API and no LLM inside
-this project.
+Copilot is the AI; this server is only its toolbox. The MCP server itself has no HTTP API and no LLM.
+
+The same read-only code also powers the **BI API** (`api_server.py`) used by the Angular
+frontend in `../BI_Frontend`: an analytics dashboard and a chatbot (Claude) that answers
+questions from the database with text plus charts – see [BI API](#bi-api-for-the-angular-frontend).
 
 ## Files
 
@@ -19,6 +22,10 @@ this project.
 | `idp_flow.py` | Actuvara IDP-specific tools: submission → files → runs → workflow nodes |
 | `query_guard.py` | Parses JSON filters/pipelines and rejects write stages and server-side JavaScript |
 | `mcp_server.py` | The MCP server: exposes the tools to Copilot over stdio |
+| `api_server.py` | BI HTTP API (FastAPI) for the Angular frontend: `/api/dashboard`, `/api/chat`, `/api/health` |
+| `dashboard.py` | Fixed read-only aggregations behind the dashboard (KPIs, trends, breakdowns) |
+| `chat_agent.py` | Chatbot: Claude + the read-only tools + `create_chart` |
+| `charts.py` | Turns aggregation rows into chart specs (shared by dashboard and chatbot) |
 | `.vscode/mcp.json` | Registers the server with Copilot in VS Code |
 | `.mcp.json` | Registers the same server with Claude Code |
 | `.claude/settings.local.json` | Pre-approves that server in Claude Code (local, not shared) |
@@ -114,3 +121,32 @@ fetched documents:   files.metadata.parent_ref_id = run id (API connector nodes)
 
 Example questions: *"Show the latest webhook submissions"*, *"What happened to submission 6abbb08c31e9b1852284e1ab?"*,
 *"Expand the P&C Claims run"*, *"Which manual uploads failed this week?"*
+
+## BI API (for the Angular frontend)
+
+`api_server.py` serves the dashboard and the chatbot to `../BI_Frontend`. It uses the same
+read-only `MongoMetadataClient` / `IdpFlow` code as the MCP server.
+
+1. In `.env` (see `.env.example`), next to `MONGODB_URI`, set the chatbot's model access - one of:
+   - **Azure OpenAI** (e.g. GPT-4.1 in Azure AI Foundry): `AZURE_OPENAI_API_KEY`,
+     `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`
+   - **Claude on Foundry**: `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_RESOURCE`,
+     `CHAT_MODEL=<Claude deployment name>`
+   - **Claude API**: `ANTHROPIC_API_KEY`
+2. `pip install -r requirements.txt`
+3. Run it:
+
+   ```powershell
+   uvicorn api_server:app --reload --port 8000
+   ```
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/health` | Database reachable? Chatbot key set? |
+| `GET /api/dashboard?days=30` | KPI tiles + charts (`days=0` = all time) |
+| `POST /api/chat` | `{"messages": [{"role": "user", "content": "..."}]}` → `{"answer", "charts", "steps"}` |
+
+**How chat answers stay grounded.** The model answers by calling the read-only tools. Charts come from a `create_chart` tool
+that takes an aggregation pipeline: the API runs it through `query_guard` and builds the
+chart from the returned rows, so every number in a chart comes from a query that ran. Each
+answer also lists the queries it used (`steps`), and the UI shows them.

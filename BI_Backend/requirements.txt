@@ -1,4 +1,8 @@
 pymongo>=4.9,<5      # Azure Cosmos DB for MongoDB (vCore)
 mcp>=1.2,<2           # 2.x renamed FastMCP -> MCPServer; this code uses the 1.x API
 python-dotenv==1.*
-pytest==8.*            # dev only: tests/test_query_guard.py (no DB needed)
+anthropic>=1.13,<2    # chatbot (api_server.py / chat_agent.py)
+openai>=1.60,<3       # chatbot via Azure OpenAI (e.g. GPT-4.1 in Foundry)
+fastapi>=0.115        # BI HTTP API for the Angular frontend
+uvicorn>=0.30
+pytest==8.*            # dev only: tests/ (no DB needed)
