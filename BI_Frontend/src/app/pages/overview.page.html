@@ -1,0 +1,232 @@
+<ng-template #delta let-v let-goodUp="goodUp">
+  @if (v != null) {
+    <span class="pill-delta" [class.up]="good(v, goodUp) === true" [class.down]="good(v, goodUp) === false">
+      {{ abs(v) }}% <bi-icon [name]="v >= 0 ? 'trend-up' : 'trend-down'" [size]="12" [stroke]="2.4" />
+    </span>
+  } @else {
+    <span class="pill-delta">new</span>
+  }
+</ng-template>
+
+<div class="page-head">
+  <h1>Dashboard</h1>
+  <div class="toolbar">
+    <div class="btn-group">
+      <span class="btn static"><bi-icon name="calendar" /> {{ rangeLabel() }}</span>
+      <div class="menu-anchor">
+        <button type="button" class="btn" (click)="toggleMenu('range', $event)" [attr.aria-expanded]="menu() === 'range'">
+          {{ periodLabel() }} <bi-icon name="chevron-down" [size]="14" />
+        </button>
+        @if (menu() === 'range') {
+          <div class="menu" (click)="$event.stopPropagation()">
+            @for (r of ranges; track r.days) {
+              <button type="button" (click)="setDays(r.days)">
+                <span class="check">@if (r.days === days()) { <bi-icon name="check" [size]="15" [stroke]="2.6" /> }</span>{{ r.label }}
+              </button>
+            }
+          </div>
+        }
+      </div>
+    </div>
+    <div class="menu-anchor">
+      <button type="button" class="btn" (click)="toggleMenu('filter', $event)" [class.on]="hiddenSources().size">
+        <bi-icon name="filter" /> Filter @if (hiddenSources().size) { <span class="count">{{ hiddenSources().size }}</span> }
+      </button>
+      @if (menu() === 'filter') {
+        <div class="menu" (click)="$event.stopPropagation()">
+          <div class="menu-title">Sources shown</div>
+          @for (s of trend().data?.sources ?? []; track s; let i = $index) {
+            <button type="button" (click)="toggleSource(s, $event)">
+              <span class="check">@if (!hiddenSources().has(s)) { <bi-icon name="check" [size]="15" [stroke]="2.6" /> }</span>
+              <i class="sw s-{{ i + 1 }}"></i>{{ sourceLabel(s) }}
+            </button>
+          }
+        </div>
+      }
+    </div>
+    <button type="button" class="btn" (click)="exportCsv()" [disabled]="!overview().data"><bi-icon name="download" /> Export</button>
+    <button type="button" class="btn icon-only" (click)="refresh()" aria-label="Refresh"><bi-icon name="refresh" /></button>
+  </div>
+</div>
+
+<div class="grid">
+  <!-- KPI cards -->
+  @for (k of kpis(); track k.title) {
+    <section class="card kpi span-4">
+      <div class="kpi-head">
+        <span class="kpi-icon"><bi-icon [name]="k.icon" [size]="16" /></span>
+        <span class="kpi-title">{{ k.title }}</span>
+        <span class="info" [title]="k.info" tabindex="0" [attr.aria-label]="k.info"><bi-icon name="info" [size]="15" /></span>
+      </div>
+      <div class="kpi-body">
+        <span class="kpi-value">{{ k.value }}</span>
+        <ng-container *ngTemplateOutlet="delta; context: { $implicit: k.delta, goodUp: k.goodUp }" />
+      </div>
+    </section>
+  } @empty {
+    @for (i of [1, 2, 3]; track i) {
+      <section class="card kpi span-4">
+        @if (overview().error) { <div class="placeholder error"><bi-icon name="alert" /> {{ overview().error }}</div> }
+        @else { <div class="placeholder"><span class="spinner"></span>Loading…</div> }
+      </section>
+    }
+  }
+
+  <!-- Submissions overview -->
+  <section class="card span-7">
+    <div class="card-head">
+      <h2><span class="head-icon"><bi-icon name="bar-chart" /></span>Submissions overview</h2>
+      <div class="head-actions">
+        <button type="button" class="btn sm" (click)="toggleMenu('filter', $event)"><bi-icon name="filter" [size]="14" /> Filter</button>
+        <button type="button" class="btn sm icon-only" (click)="ask('Break down submissions by source and day, and point out anything unusual.')" aria-label="Ask about this chart"><bi-icon name="sparkles" [size]="15" /></button>
+      </div>
+    </div>
+    @if (trend().data && overview().data) {
+      <div class="big-number">{{ full(flowTotal()) }}</div>
+      <div class="sub-line">
+        <ng-container *ngTemplateOutlet="delta; context: { $implicit: overview().data!.change_pct['submissions'], goodUp: true }" />
+        @if (submissionsIncrease(); as inc) { <span class="muted">{{ inc > 0 ? '+' : '' }}{{ full(inc) }} {{ inc >= 0 ? 'increased' : 'decreased' }}</span> }
+      </div>
+      <bi-flow-chart [buckets]="flowBuckets()" [series]="flowSeries()" />
+    } @else if (trend().error) { <div class="placeholder error">{{ trend().error }}</div> }
+    @else { <div class="placeholder tall"><span class="spinner"></span>Loading…</div> }
+  </section>
+
+  <!-- Weekday -->
+  <section class="card span-5">
+    <div class="card-head">
+      <h2><span class="head-icon"><bi-icon name="activity" /></span>{{ weekdayMetric() === 'runs' ? 'Runs' : 'Submissions' }} by weekday</h2>
+      <div class="menu-anchor">
+        <button type="button" class="btn sm" (click)="toggleMenu('weekday', $event)">
+          {{ weekdayMetric() === 'runs' ? 'Runs' : 'Submissions' }} <bi-icon name="chevron-down" [size]="14" />
+        </button>
+        @if (menu() === 'weekday') {
+          <div class="menu right" (click)="$event.stopPropagation()">
+            <button type="button" (click)="weekdayMetric.set('runs'); menu.set(null)"><span class="check">@if (weekdayMetric() === 'runs') { <bi-icon name="check" [size]="15" [stroke]="2.6" /> }</span>Runs</button>
+            <button type="button" (click)="weekdayMetric.set('submissions'); menu.set(null)"><span class="check">@if (weekdayMetric() === 'submissions') { <bi-icon name="check" [size]="15" [stroke]="2.6" /> }</span>Submissions</button>
+          </div>
+        }
+      </div>
+    </div>
+    @if (trend().data && overview().data) {
+      <div class="big-number">{{ full(weekdayTotal()) }}</div>
+      <div class="sub-line">
+        <ng-container *ngTemplateOutlet="delta; context: { $implicit: weekdayDelta(), goodUp: true }" />
+        @if (weekdayIncrease(); as inc) { <span class="muted">{{ inc > 0 ? '+' : '' }}{{ full(inc) }} {{ inc >= 0 ? 'increased' : 'decreased' }}</span> }
+      </div>
+      <bi-weekday-chart [values]="weekday()" />
+    } @else if (trend().error) { <div class="placeholder error">{{ trend().error }}</div> }
+    @else { <div class="placeholder tall"><span class="spinner"></span>Loading…</div> }
+  </section>
+
+  <!-- Run distribution -->
+  <section class="card span-5">
+    <div class="card-head">
+      <h2><span class="head-icon"><bi-icon name="layers" /></span>Run distribution</h2>
+      <span class="btn sm static">{{ periodLabel() }}</span>
+    </div>
+    @if (overview().data; as o) {
+      <div class="dist">
+        @for (p of distribution(); track p.label) {
+          <div class="dist-item dist-{{ p.role }}">
+            <span class="muted">{{ p.label }}</span>
+            <b>{{ full(p.value) }}</b>
+          </div>
+        }
+      </div>
+      <bi-gauge [parts]="distribution()" [center]="o.current.success_rate == null ? '–' : o.current.success_rate + '%'"
+                caption="completed" />
+      <div class="dist-foot">
+        <span><span class="muted">Avg processing</span> <b>{{ duration(o.current.avg_processing_s) }}</b></span>
+        <span><span class="muted">Avg confidence</span>
+          <b>{{ o.current.avg_confidence == null ? '–' : (o.current.avg_confidence <= 1 ? (o.current.avg_confidence * 100).toFixed(1) + '%' : o.current.avg_confidence) }}</b></span>
+      </div>
+    } @else if (overview().error) { <div class="placeholder error">{{ overview().error }}</div> }
+    @else { <div class="placeholder tall"><span class="spinner"></span>Loading…</div> }
+  </section>
+
+  <!-- Processes -->
+  <section class="card span-7">
+    <div class="card-head">
+      <h2><span class="head-icon"><bi-icon name="workflow" /></span>Processes</h2>
+      @if (selected().size) {
+        <button type="button" class="link-btn" (click)="askSelected()"><bi-icon name="sparkles" [size]="14" /> Compare {{ selected().size }} selected</button>
+      } @else {
+        <a class="link-btn" href="#/submissions">See all</a>
+      }
+    </div>
+    @if (processes().data; as rows) {
+      @if (rows.length) {
+        <div class="table-wrap">
+          <table class="table list">
+            <thead>
+              <tr>
+                <th class="cb"><input type="checkbox" [checked]="selected().size === rows.length" (change)="toggleAll()" aria-label="Select all" /></th>
+                <th>Process</th><th class="num">Runs</th><th>Success rate</th><th class="num">Avg time</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (p of rows; track p.name) {
+                <tr>
+                  <td class="cb"><input type="checkbox" [checked]="selected().has(p.name)" (change)="toggleRow(p.name)" [attr.aria-label]="'Select ' + p.name" /></td>
+                  <td>
+                    <button type="button" class="proc" (click)="ask('Analyse the ' + p.name + ' process: failures, slow nodes and recent problem runs.')">
+                      <span class="proc-avatar s-{{ avatarSlot(p.name) }}">{{ initial(p.name) }}</span>
+                      <span class="ellipsis">{{ p.name }}</span>
+                    </button>
+                  </td>
+                  <td class="num">{{ full(p.runs) }}<div class="muted small">{{ p.failed ? full(p.failed) + ' failed' : '' }}</div></td>
+                  <td>
+                    <div class="rate">
+                      <span class="rate-track"><span class="rate-fill" [style.width.%]="p.success_rate ?? 0"></span></span>
+                      <span>{{ p.success_rate == null ? '–' : p.success_rate + '%' }}</span>
+                    </div>
+                  </td>
+                  <td class="num">{{ duration(p.avg_processing_s) }}</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      } @else { <div class="placeholder">No runs in this period.</div> }
+    } @else if (processes().error) { <div class="placeholder error">{{ processes().error }}</div> }
+    @else { <div class="placeholder"><span class="spinner"></span>Loading…</div> }
+  </section>
+
+  <!-- Node hotspots -->
+  <section class="card span-12">
+    <div class="card-head">
+      <h2><span class="head-icon"><bi-icon name="alert" /></span>Workflow nodes needing attention</h2>
+      <span class="muted small">Click a node to ask why</span>
+    </div>
+    @if (hotspots().data; as rows) {
+      <div class="hotspots">
+        @for (n of rows; track n.node_id) {
+          <button type="button" class="hotspot" (click)="askNode(n)">
+            <div class="hotspot-top">
+              <span class="ellipsis"><b>{{ n.name }}</b>@if (n.process) {<span class="muted sep">· {{ n.process }}</span>}</span>
+              <b>{{ full(n.total) }}</b>
+            </div>
+            <div class="meter"><span class="fill fill-critical" [style.width.%]="(100 * n.total) / maxHotspot()"></span></div>
+            <div class="hotspot-meta">
+              @for (st of n.by_status | keyvalue; track st.key) { <span><bi-status [status]="st.key" /> {{ st.value }}</span> }
+            </div>
+            @if (n.sample_reason) { <div class="node-err">{{ n.sample_reason }}</div> }
+          </button>
+        } @empty { <div class="placeholder"><bi-icon name="check-circle" /> No failed, rejected or waiting nodes in this period.</div> }
+      </div>
+    } @else if (hotspots().error) { <div class="placeholder error">{{ hotspots().error }}</div> }
+    @else { <div class="placeholder"><span class="spinner"></span>Loading…</div> }
+  </section>
+
+  <!-- Latest submissions -->
+  <section class="card span-12">
+    <div class="card-head">
+      <h2><span class="head-icon"><bi-icon name="inbox" /></span>Latest submissions</h2>
+      <a class="link-btn" href="#/submissions">See all</a>
+    </div>
+    @if (recent().data; as rows) { <bi-submissions-table [rows]="rows" (open)="ui.openSubmissionId.set($event)" /> }
+    @else if (recent().error) { <div class="placeholder error">{{ recent().error }}</div> }
+    @else { <div class="placeholder"><span class="spinner"></span>Loading…</div> }
+  </section>
+</div>

@@ -1,0 +1,116 @@
+<div class="assistant">
+  <!-- Past chats -->
+  <aside class="chat-side">
+    <button type="button" class="new-chat" (click)="newChat()"><bi-icon name="plus" /> New chat</button>
+    <div class="history">
+      @for (g of groups(); track g.label) {
+        <div class="history-group">{{ g.label }}</div>
+        @for (c of g.items; track c.id) {
+          @if (editingId() === c.id) {
+            <div class="history-item editing">
+              <input #rename class="history-rename" [value]="c.title" maxlength="80" aria-label="Chat name"
+                     (keydown.enter)="rename.blur()" (keydown.escape)="editingId.set(null)"
+                     (blur)="saveTitle(c.id, rename.value)" />
+            </div>
+          } @else {
+            <div class="history-item" [class.active]="c.id === activeId()" role="button" tabindex="0"
+                 (click)="open(c.id)" (keydown.enter)="open(c.id)" [title]="c.title">
+              <span class="ellipsis">{{ c.title }}</span>
+              <span class="history-actions">
+                <button type="button" class="icon-btn tiny" (click)="startEdit(c.id, $event)" aria-label="Rename chat"><bi-icon name="pencil" [size]="13" /></button>
+                <button type="button" class="icon-btn tiny" (click)="remove(c.id, $event)" aria-label="Delete chat"><bi-icon name="trash" [size]="13" /></button>
+              </span>
+            </div>
+          }
+        }
+      } @empty {
+        <p class="muted small history-empty">Your questions will appear here.</p>
+      }
+    </div>
+  </aside>
+
+  <!-- Conversation -->
+  <section class="chat-main">
+    @if (ui.health()?.chat_configured === false) {
+      <div class="banner"><bi-icon name="alert" /> The assistant isn't configured yet: set <code>AZURE_OPENAI_API_KEY</code>, <code>AZURE_OPENAI_ENDPOINT</code> and <code>AZURE_OPENAI_DEPLOYMENT</code> in <code>BI_Backend/.env</code> and restart the API server.</div>
+    }
+
+    @if (!active()) {
+      <div class="chat-empty">
+        <div class="orb" aria-hidden="true"></div>
+        <div class="hello">{{ greeting }}</div>
+        <h1 class="hello-q">How can I assist you today?</h1>
+        <div class="cards3">
+          @for (c of cards; track c.title) {
+            <button type="button" class="prompt-card" (click)="send(c.text)">
+              <bi-icon [name]="c.icon" [size]="22" [stroke]="1.6" />
+              <b>{{ c.title }}</b>
+              <span>{{ c.text }}</span>
+            </button>
+          }
+        </div>
+        <ng-container *ngTemplateOutlet="composer" />
+      </div>
+    } @else {
+      <div class="thread" #thread>
+        @for (m of active()!.messages; track $index) {
+          @if (m.role === 'user') {
+            <div class="msg msg-user"><div class="bubble">{{ m.text }}</div></div>
+          } @else {
+            <div class="msg msg-bot">
+              <div class="bot-avatar" aria-hidden="true"><bi-icon name="sparkles" [size]="15" /></div>
+              <div class="bot-body">
+                @if (m.pending) {
+                  <div class="steps"><span class="spinner sm"></span> Querying the database…</div>
+                } @else if (m.steps?.length) {
+                  <details class="steps">
+                    <summary>Looked up the database in {{ m.steps!.length }} step{{ m.steps!.length > 1 ? 's' : '' }}</summary>
+                    <ol>
+                      @for (s of m.steps; track s.id) {
+                        <li [class.err]="!s.ok">
+                          <bi-icon [name]="s.ok ? 'check-circle' : 'x-circle'" [size]="13" />
+                          <code>{{ s.name }}</code>
+                          <span class="muted ellipsis">{{ stepLabel(s) }}</span>
+                        </li>
+                      }
+                    </ol>
+                  </details>
+                }
+                @if (m.text) {
+                  <div class="md" [class.md-error]="m.error" [innerHTML]="m.text | markdown"></div>
+                } @else if (m.pending) {
+                  <div class="typing"><span></span><span></span><span></span></div>
+                }
+                @for (c of m.charts ?? []; track $index) { <bi-chat-chart [spec]="c" /> }
+              </div>
+            </div>
+          }
+        }
+      </div>
+      <div class="composer-dock">
+        <div class="prompt-strip" role="list" aria-label="Suggested questions">
+          <span class="prompt-strip-label"><bi-icon name="sparkles" [size]="13" /> Try</span>
+          @for (p of allPrompts; track p) {
+            <button type="button" role="listitem" class="prompt-chip" (click)="send(p)" [disabled]="busy()">{{ p }}</button>
+          }
+        </div>
+        <ng-container *ngTemplateOutlet="composer" />
+      </div>
+    }
+  </section>
+</div>
+
+<ng-template #composer>
+  <div class="composer">
+    <textarea [(ngModel)]="draft" (keydown)="onKey($event)" rows="2" placeholder="Ask me anything about the Actuvara data…"
+              aria-label="Your question"></textarea>
+    <div class="composer-bar">
+      <span class="muted small read-only"><bi-icon name="database" [size]="13" /> Read-only access</span>
+      @if (busy()) {
+        <button type="button" class="send-orb" (click)="stop()" aria-label="Stop"><bi-icon name="stop" /></button>
+      } @else {
+        <button type="button" class="send-orb" (click)="send()" [disabled]="!draft.trim()" aria-label="Send"><bi-icon name="arrow-up" /></button>
+      }
+    </div>
+  </div>
+</ng-template>
