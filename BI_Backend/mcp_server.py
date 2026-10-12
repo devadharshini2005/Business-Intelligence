@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 
@@ -23,6 +23,8 @@ load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
+from bi_analytics import BiAnalytics, metric_rows  # noqa: E402
+from charts import CHART_TYPES  # noqa: E402
 from idp_flow import IdpFlow  # noqa: E402
 from mongo_db import MongoMetadataClient  # noqa: E402
 from query_guard import QueryGuardError  # noqa: E402
@@ -332,6 +334,33 @@ async def get_database_overview(database: str = "", sample_size: int = 30) -> di
             "collection_count": len(collections),
             "collections": collections,
             "relationships": client.get_inferred_relationships("", db, sample_size),
+        }
+    except Exception as ex:
+        return _err(ex)
+
+
+@mcp.tool()
+async def chart_metric(
+    metric: Literal["runs_by_status", "runs_by_process", "submissions_by_source", "failing_nodes",
+                    "submissions_per_day", "runs_per_day"],
+    days: int,
+    chart_type: Literal["bar", "hbar", "line", "pie", "doughnut", "table", "kpi"],
+    title: str = "",
+) -> dict[str, Any]:
+    """Return the dashboard's tested rows for a standard metric, ready to chart."""
+    try:
+        rows, x_field, y_fields, series_names, default_title = metric_rows(
+            BiAnalytics(_db().database()), metric, days
+        )
+        if chart_type not in CHART_TYPES:
+            raise ValueError(f"chart_type must be one of {', '.join(CHART_TYPES)}")
+        return {
+            "rows": rows,
+            "x_field": x_field,
+            "y_fields": y_fields,
+            "series_names": series_names,
+            "title": title or default_title,
+            "chart_type": chart_type,
         }
     except Exception as ex:
         return _err(ex)

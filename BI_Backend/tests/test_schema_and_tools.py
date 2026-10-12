@@ -45,7 +45,7 @@ def test_bad_field_paths_rejected(path):
 def test_read_tools_only():
     tools = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
     assert {"list_collections", "infer_collection_schema", "get_inferred_relationships",
-            "get_database_overview", "run_find", "run_aggregate", "get_distinct_values"} <= tools
+            "get_database_overview", "run_find", "run_aggregate", "get_distinct_values", "chart_metric"} <= tools
     write_words = ("insert", "update", "delete", "remove", "drop", "replace", "create", "write", "bulk")
     assert not [t for t in tools if any(w in t.lower() for w in write_words)]
 
