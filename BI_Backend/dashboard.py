@@ -102,7 +102,9 @@ class Dashboard:
             {"$sort": {"n": -1}},
             {"$limit": 10},
             {"$lookup": {"from": "processes", "localField": "_id", "foreignField": "_id", "as": "p"}},
-            {"$project": {"n": 1, "name": {"$ifNull": [{"$first": "$p.name"}, {"$toString": "$_id"}]}}},
+            {"$project": {"n": 1, "name": {"$ifNull": [
+                {"$first": "$p.name"},
+                {"$concat": ["Deleted process (", {"$substrCP": [{"$toString": "$_id"}, 18, 6]}, ")"]}]}}},
         ]))
         return from_rows("Top 10 processes by runs", "hbar", rows, "name", ["n"], ["Runs"])
 
@@ -120,7 +122,8 @@ class Dashboard:
         rows = IdpFlow(self.db).find_submissions(days=days, limit=10)
         cols = ["received_at", "source", "title", "from", "status", "files", "runs", "run_status"]
         return {"title": "Latest submissions", "type": "table", "columns": cols,
-                "rows": [[r.get(c) for c in cols] for r in rows]}
+                "rows": [[r.get(c) for c in cols] for r in rows],
+                "row_ids": [r.get("submission_id") for r in rows]}
 
     # --- everything ----------------------------------------------------------
     def build(self, days: int = 30) -> dict[str, Any]:

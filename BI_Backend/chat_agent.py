@@ -1,320 +1,333 @@
-"""Chatbot over the Actuvara database: an LLM answers questions using the same
-read-only tools the MCP server exposes, and attaches charts built from real
-query results.
+"""Chatbot over the Actuvara database. Azure OpenAI (gpt-5 by default) answers questions by calling the
+tools of the MCP server (mcp_server.py) - the same read-only tools Copilot and Claude Code use - and
+attaches charts that build_chart makes from real query results.
 
-The model never writes chart numbers itself: `create_chart` takes an
-aggregation pipeline, this module runs it (through query_guard, read-only) and
-turns the rows into a chart spec. The chart and the text come from the same data.
+Every answer is checked before it is accepted: figures must come from a query, appear in the tool results
+and carry a chart; "there is none" must not rest only on empty results; ids must exist. A failing answer is
+sent back to the model (at most MAX_CORRECTIONS times).
 
-Configuration (.env) - the first provider whose key is set is used:
-  Azure OpenAI (e.g. GPT-4.1 in Azure AI Foundry)
-                      AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT,
-                      optional AZURE_OPENAI_API_VERSION
-  Claude on Foundry   ANTHROPIC_FOUNDRY_API_KEY + ANTHROPIC_FOUNDRY_RESOURCE (or ANTHROPIC_FOUNDRY_BASE_URL);
-                      CHAT_MODEL = your Claude deployment name; optional CHAT_FALLBACK_MODEL
-  Claude API          ANTHROPIC_API_KEY; optional CHAT_MODEL
-optional for Claude: CHAT_EFFORT.
+.env: AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, optional AZURE_OPENAI_DEPLOYMENT (gpt-5),
+AZURE_OPENAI_API_VERSION, AZURE_OPENAI_REASONING_EFFORT (low | medium | high).
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
+import re
 import sys
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-import anthropic
 import openai
+from mcp import ClientSession
 
-from charts import CHART_TYPES, from_rows
-from idp_flow import IdpFlow
-from mongo_db import MongoMetadataClient
+from charts import run_steps_table, submission_table
 
-MODEL = os.getenv("CHAT_MODEL", "claude-opus-5-5")
-EFFORT = os.getenv("CHAT_EFFORT", "medium")
-FALLBACK_MODEL = os.getenv("CHAT_FALLBACK_MODEL", "").strip()
-USE_AZURE_OPENAI = bool(os.getenv("AZURE_OPENAI_API_KEY"))
-USE_FOUNDRY = not USE_AZURE_OPENAI and bool(os.getenv("ANTHROPIC_FOUNDRY_API_KEY"))
-AZURE_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")
-AZURE_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
-MAX_TURNS = 15               # model <-> tool round trips per question
-MAX_RESULT_CHARS = 40_000    # per tool result, keeps the context small
-MAX_CHARTS = 4
+DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5")
+API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
+REASONING = DEPLOYMENT.lower().startswith(("gpt-5", "o1", "o3", "o4"))  # no temperature; max_completion_tokens
+REASONING_EFFORT = os.getenv("AZURE_OPENAI_REASONING_EFFORT", "low")
+MAX_TURNS, MAX_CORRECTIONS, MAX_CHARTS, MAX_RESULT_CHARS = 15, 2, 4, 40_000
 
-SYSTEM_PROMPT = """You are the analytics assistant for Actuvara's IDP (intelligent document processing) platform.
-You answer questions about the data in its MongoDB database (Azure Cosmos DB for MongoDB vCore) by calling the
-read-only tools you have. You can read data; you cannot change it - if asked to, say this assistant is read-only.
+# MCP tools the chatbot may use (admin / heavy ones are left to Copilot).
+CHAT_TOOLS = {"list_collections", "infer_collection_schema", "get_distinct_values", "count_documents", "run_find",
+              "run_aggregate", "find_fields_like", "get_inferred_relationships", "find_id", "idp_find_submissions",
+              "idp_get_submission", "idp_get_run_details", "build_chart"}
+DATA_TOOLS = {"run_aggregate", "run_find", "count_documents", "build_chart"}
 
-Ground every statement in tool results from this conversation. Never guess a count, name, id, date or field;
-if the data doesn't answer the question, say so and say what you checked.
+SYSTEM_PROMPT = """You are the analytics assistant for Actuvara's IDP (intelligent document processing) platform. You answer
+questions about its MongoDB database with read-only tools. You cannot change data - if asked to, say so.
 
-How the IDP data fits together:
+Data model:
   submission  emails | webhooks | manual_extractions   (email trigger / webhook trigger / manual upload)
     -> files  files.source_email_id | source_webhook_id | source_manual_extraction_id
-      -> runs  extraction_results (one per file x process; retries add runs). Fields: status, file_id,
-               proccess_id (sic), created_at, completed_at, confidence_score, total_processing_time_ms,
-               email_id | webhook_id | manual_extraction_id
-        -> nodes  file_process_tracker (one row per workflow node; extraction_result_id, node_id, status)
-  process names: processes.name; workflow node labels: processes.workflow.nodes[].label
-  received dates: emails.date_received, webhooks.received_at, manual_extractions.uploaded_at; files.uploaded_at
-For questions about a specific submission, file or run use the idp_* tools. For counts, trends and breakdowns
-use run_aggregate. If you are unsure of a field name or its type, check with infer_collection_schema or
-get_distinct_values before building a pipeline - do not assume. Dates are BSON dates unless a schema says otherwise.
-
-Charts: whenever the answer contains numbers that compare, rank, break down or trend (counts by status, per day,
-per process, top N, shares), call create_chart with an aggregation pipeline that produces exactly those numbers -
-usually 1 chart, at most 3, each showing something different. Pick the chart type by the data's job: line for change
-over time (sort by date ascending), bar for comparing categories, hbar for ranked lists or long labels, doughnut for
-parts of a whole with at most 6 parts, kpi for one headline number, table for row-level detail (ids, names, dates).
-Do not chart a single yes/no or a single record. Charts appear below your text automatically.
-
-Answer format: start with the direct answer in one or two sentences, then any short supporting detail in Markdown.
-Do not repeat every number a chart shows - mention the key ones. Keep ids exactly as returned.
+      -> runs  extraction_results: status, file_id, proccess_id (sic), created_at, completed_at, confidence_score
+               (0-1), total_processing_time_ms, email_id | webhook_id | manual_extraction_id
+        -> nodes  file_process_tracker (one row per workflow step: extraction_result_id, node_id, status)
+  processes.name; received: emails.date_received, webhooks.received_at, manual_extractions.uploaded_at
+  platform users: app_users; logins: app_sessions (name, email, created_at = login time); system_logs (action "Login")
+Definitions - use them consistently and say which one you counted:
+  files processed by a process = DISTINCT file_id in extraction_results for its proccess_id;
+  runs = extraction_results documents; submissions = emails + webhooks + manual_extractions;
+  when a file/run was processed = extraction_results.created_at (completed_at only if asked about completion).
+Rules:
+- Every number you state must come from a tool result in this conversation; never estimate, count lists or add up
+  yourself - compute with $count / $sum / $group. List results carry row_count.
+- Never invent ids. Find a process by name first: {"name": {"$regex": "<words>", "$options": "i"}} on processes,
+  then filter extraction_results by proccess_id {"$oid": ...}. If nothing matches, list the available names.
+- If unsure of a field or value, check with infer_collection_schema / get_distinct_values first.
+- For one submission, file, run or step id call idp_get_submission first (any of these ids works), then
+  idp_get_run_details for a run's steps; find_id tells what an unknown id is. These two idp tools attach a table
+  themselves. If a submission record is reported deleted, say so and still describe its files and runs.
+Charts: answers with numbers MUST have charts from build_chart (they appear below your text). Make 2-3 charts that
+each show something different: a single number is a kpi PLUS breakdowns that explain it (trend per day/week, by
+status, by type, by source, top items). Types: line = over time (sort by date; $match the date field
+{"$type": "date"}; per day "%Y-%m-%d" under ~2 months, per week "%G-W%V" under ~6, else per month - at least 5
+points), bar = categories, hbar = rankings / long labels, doughnut = parts of a whole (<= 6), kpi = one number,
+table = row detail. One line/bar per category: long rows {day, source, n} + series_field="source". Compare
+collections with $unionWith. Label with names, not ids: after grouping by proccess_id add {"$lookup": {"from":
+"processes", "localField": "_id", "foreignField": "_id", "as": "p"}}, {"$set": {"name": {"$ifNull": [{"$first":
+"$p.name"}, "Unknown / deleted process"]}}}. Confidence as % (x100, unit "%"). Never mix units in one chart.
+If a tool returns an error, fix the call and retry.
+Answer: the direct answer in 1-2 sentences, then short Markdown detail; read each value next to its own label.
+Last line, exactly: FOLLOW_UPS: <question> | <question> | <question>   (2-3 follow-ups answerable from this data)
 """
+
+
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30), "IST")
+
+
+def system_prompt() -> str:
+    """Instructions + today's date. Users are in India, so 'today' is the IST day (dates are stored in UTC)."""
+    now = dt.datetime.now(IST)
+    utc = lambda d: d.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return (SYSTEM_PROMPT + f"\nNow: {now:%A %d %B %Y, %H:%M} IST (India). Dates are stored in UTC, so use these "
+            f'boundaries: today = {{"$gte": {{"$date": "{utc(today)}"}}}}, yesterday from '
+            f"{utc(today - dt.timedelta(days=1))}, last 7 days from {utc(today - dt.timedelta(days=7))}, last 30 days "
+            f"from {utc(today - dt.timedelta(days=30))}. Show times in IST ($dateToString with timezone \"+05:30\"). "
+            f"Never use another year.\n")
 
 
 def _log(msg: str) -> None:
     print(f"[actuvara-chat] {msg}", file=sys.stderr, flush=True)
 
 
-def _schema(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
-    return {"type": "object", "properties": props, "required": required}
+# --- answer checks ---------------------------------------------------------------------------------------------
+_IDS_AND_DATES = re.compile(r"\b[0-9a-f]{24}\b|\b\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+Z?)?\b|FOLLOW_UPS:.*", re.I | re.S)
+_HEX_ID = re.compile(r"\b[0-9a-f]{24}\b", re.I)
+_NUMBER = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
+_PERIOD = re.compile(r"\s*(?:days?|weeks?|months?|years?|hours?|minutes?)\b", re.I)
 
 
-S = {"type": "string"}
-I = {"type": "integer"}
-B = {"type": "boolean"}
-
-TOOLS: list[dict[str, Any]] = [
-    {"name": "list_collections", "description": "List collections (MongoDB's tables) with their approximate document counts.",
-     "input_schema": _schema({}, [])},
-    {"name": "infer_collection_schema",
-     "description": "Field paths and types found in a sample of a collection's documents, with how often each appears.",
-     "input_schema": _schema({"collection": S, "sample_size": I}, ["collection"])},
-    {"name": "get_distinct_values",
-     "description": "Distinct values of one field with document counts - use for status/type/category fields.",
-     "input_schema": _schema({"collection": S, "field_path": S, "limit": I}, ["collection", "field_path"])},
-    {"name": "count_documents",
-     "description": 'Number of documents in a collection, optionally matching a JSON filter string, e.g. \'{"status": "failed"}\'.',
-     "input_schema": _schema({"collection": S, "filter": S}, ["collection"])},
-    {"name": "run_find",
-     "description": "Read documents with one find(). filter, projection and sort are JSON strings "
-                    '(MongoDB Extended JSON accepted, e.g. {"_id": {"$oid": "..."}}). Always project only the fields you need.',
-     "input_schema": _schema({"collection": S, "filter": S, "projection": S, "sort": S, "max_rows": I}, ["collection"])},
-    {"name": "run_aggregate",
-     "description": "Run one read-only aggregation pipeline given as a JSON array string. $out, $merge and "
-                    "server-side JavaScript are rejected. Dates in $match: {\"$date\": \"2026-01-01T00:00:00Z\"}.",
-     "input_schema": _schema({"collection": S, "pipeline": S, "max_rows": I}, ["collection", "pipeline"])},
-    {"name": "get_inferred_relationships",
-     "description": "Likely links between collections, inferred from '<name>_id' fields and checked on a sample.",
-     "input_schema": _schema({"collection": S}, [])},
-    {"name": "idp_find_submissions",
-     "description": "List IDP submissions newest first across email, webhook and manual uploads, with file and run counts. "
-                    "source: email | webhook | manual_upload (empty = all); status: the submission's status; "
-                    "search: text in subject/sender/claim or policy number; days: last N days (0 = any).",
-     "input_schema": _schema({"source": S, "status": S, "search": S, "days": I, "limit": I}, [])},
-    {"name": "idp_get_submission",
-     "description": "One submission (or the submission of a file id / run id): details, files, and per file its runs with "
-                    "node progress, current step and failed / awaiting-approval nodes.",
-     "input_schema": _schema({"submission_id": S, "include_nodes": B}, ["submission_id"])},
-    {"name": "idp_get_run_details",
-     "description": "One run (extraction_results id): every workflow node in order with status, timing, errors and approvals.",
-     "input_schema": _schema({"run_id": S, "include_extracted_data": B}, ["run_id"])},
-    {"name": "create_chart",
-     "description": "Attach a chart to your answer. The pipeline runs on `collection` and each output row becomes one "
-                    "point: x_field gives the label (category or date string), y_fields the numeric values (one series "
-                    "each). Sort the pipeline output the way the chart should read. For kpi, the pipeline returns one row "
-                    "and y_fields[0] is the value. For table, x_field and y_fields are the columns in order. The result "
-                    "returns the rows that were charted.",
-     "input_schema": _schema({
-         "title": {"type": "string", "description": "Short title that says what is measured, e.g. 'Failed runs per day'"},
-         "chart_type": {"type": "string", "enum": list(CHART_TYPES)},
-         "collection": S,
-         "pipeline": {"type": "string", "description": "JSON array of aggregation stages"},
-         "x_field": {"type": "string", "description": "Field of each output row used as the label, e.g. '_id' or 'day'"},
-         "y_fields": {"type": "array", "items": {"type": "string"}},
-         "series_names": {"type": "array", "items": {"type": "string"},
-                          "description": "Human names for y_fields, same order (e.g. ['Runs'])"},
-         "unit": {"type": "string", "description": "Optional unit shown with values, e.g. '%' or 's'"},
-     }, ["title", "chart_type", "collection", "pipeline", "x_field", "y_fields"])},
-]
+def ids_in(value: Any) -> set[str]:
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    return {i.lower() for i in _HEX_ID.findall(text)}
 
 
-def _make_client() -> tuple[Any, dict[str, Any]]:
-    """The model client plus any extra per-request arguments it needs.
-    Claude on Foundry has no server-side fallbacks, so there the SDK middleware retries a
-    declined request on CHAT_FALLBACK_MODEL (a deployment that must exist in the same resource)."""
-    if USE_AZURE_OPENAI:
-        url = urlparse(os.getenv("AZURE_OPENAI_ENDPOINT", "").strip())
-        if not url.scheme or not url.netloc:
-            raise ValueError("Set AZURE_OPENAI_ENDPOINT in .env (e.g. https://<resource>.openai.azure.com/)")
-        # Only the host is used: a Foundry project / agent / Target URI path ('/api/projects/...',
-        # '/openai/deployments/...') pasted from the portal makes Azure reject the API version.
-        endpoint = f"{url.scheme}://{url.netloc}/"
-        return openai.AzureOpenAI(azure_endpoint=endpoint, api_key=os.environ["AZURE_OPENAI_API_KEY"],
-                                  api_version=AZURE_API_VERSION, max_retries=2), {}
-    if USE_FOUNDRY:
-        middleware = ([anthropic.BetaRefusalFallbackMiddleware([{"model": FALLBACK_MODEL}])]
-                      if FALLBACK_MODEL else None)
-        # Reads ANTHROPIC_FOUNDRY_API_KEY and ANTHROPIC_FOUNDRY_RESOURCE / _BASE_URL.
-        return anthropic.AnthropicFoundry(middleware=middleware), {}
-    return anthropic.Anthropic(), {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+def split_follow_ups(text: str) -> tuple[str, list[str]]:
+    """Strip the trailing 'FOLLOW_UPS: a | b' line from an answer."""
+    lines = text.rstrip().splitlines()
+    for i in range(len(lines) - 1, max(len(lines) - 4, -1), -1):
+        line = lines[i].strip().strip("*_` ")
+        if line.upper().startswith("FOLLOW_UPS:"):
+            qs = [q.strip(" -*_`") for q in line[len("FOLLOW_UPS:"):].split("|")]
+            return "\n".join(lines[:i]).rstrip(), [q for q in qs if q][:3]
+    return text.strip(), []
 
 
-# Same tools in the OpenAI function-calling shape.
-OPENAI_TOOLS = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
-                                                  "parameters": t["input_schema"]}} for t in TOOLS]
+def is_empty(result: Any) -> bool:
+    """No rows, only a row of zeros ($count over nothing on Cosmos DB), count 0, or nothing charted."""
+    if not isinstance(result, dict):
+        return False
+    if "charts" in result:
+        return not result["charts"]
+    if "document_count" in result:
+        return not result["document_count"]
+    rows = result.get("rows")
+    if rows is None:
+        return False
+    zero_row = len(rows) == 1 and isinstance(rows[0], dict) and any(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in rows[0].values()) and all(
+        v == 0 for k, v in rows[0].items() if k != "_id" and isinstance(v, (int, float)) and not isinstance(v, bool))
+    return not rows or zero_row
+
+
+def unverified_numbers(text: str, sources: list[str]) -> list[str]:
+    """Figures in the answer that no tool result (or the question) contains, allowing for 1,234 formatting,
+    rounding, 0.366 shown as 36.6% and a % of two results. Whole numbers <= 12 and periods are not checked."""
+    tokens = set(_NUMBER.findall("\n".join(sources)))
+    values = [float(t.replace(",", "")) for t in list(tokens)[:3000]]
+    small = sorted({abs(v) for v in values if v})[:150]
+    ratios = {round(100 * a / b, 1) for a in small for b in small if a <= b}
+    clean, bad = _IDS_AND_DATES.sub(" ", text), []
+    for m in _NUMBER.finditer(clean):
+        tok = m.group()
+        n = float(tok.replace(",", ""))
+        if tok in tokens or _PERIOD.match(clean, m.end()) or (n.is_integer() and n <= 12):
+            continue
+        near = lambda v: abs(n - v) <= max(0.051, 0.0051 * abs(v))  # noqa: E731
+        if not (any(near(v) or near(v * 100) for v in values) or round(n, 1) in ratios):
+            bad.append(tok)
+    return list(dict.fromkeys(bad))
+
+
+def answer_problem(text: str, steps: list[dict[str, Any]], charts: list[dict[str, Any]],
+                   sources: list[str]) -> str | None:
+    """Why a final answer can't be accepted yet (sent back to the model), or None."""
+    data = [s for s in steps if s["tool"] in DATA_TOOLS and s["ok"]]
+    if data and all(s.get("empty") for s in data) and not charts:
+        return ("Every query returned no data - don't conclude there is none yet; the filter is probably wrong. Look "
+                "up processes by name (case-insensitive) and filter by proccess_id, check values with "
+                "get_distinct_values, compare dates as dates. Query again, then answer.")
+    if not re.search(r"\d", _IDS_AND_DATES.sub("", text)):
+        return None
+    if not any(s["ok"] for s in steps):
+        return "Your answer has figures but you queried nothing. Query the data now and use only the results."
+    if not charts:
+        return "Your answer has figures but no chart. Call build_chart with the data behind them, then answer."
+    thin = [c["title"] for c in charts if c["type"] == "line" and len(c.get("labels") or []) < 3]
+    if thin:
+        return (f"The trend '{thin[0]}' has fewer than 3 points. Make it per day or per week instead, with a title "
+                f"naming the grain; the old chart is removed automatically.")
+    if all(c["type"] == "kpi" for c in charts):
+        return ("Only a headline number is attached. Add 1-2 breakdown charts that explain it (trend over time, by "
+                "status, by type, by source or top items), then answer.")
+    bad = unverified_numbers(text, sources)
+    if bad:
+        return (f"These figures are not in any tool result: {', '.join(bad)}. Get every number from a query "
+                f"($count / $sum / $group) and state only numbers the results contain.")
+    return None
+
+
+# --- agent -----------------------------------------------------------------------------------------------------
+async def call_tool(session: ClientSession, name: str, args: dict[str, Any]) -> tuple[Any, bool]:
+    """Call an MCP tool and return (result as JSON data, is_error)."""
+    res = await session.call_tool(name, args)
+    text = "".join(c.text for c in res.content if getattr(c, "type", "") == "text")
+    data = res.structuredContent
+    if data is None:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = text
+    if isinstance(data, dict) and set(data) == {"result"}:  # FastMCP wraps non-object returns
+        data = data["result"]
+    error = res.isError or (isinstance(data, dict) and "error" in data)
+    return (data.get("error", text) if isinstance(data, dict) and error else data), bool(error)
 
 
 class ChatAgent:
-    def __init__(self, mongo: MongoMetadataClient) -> None:
-        self.mongo = mongo
-        self.client, self.fallback_args = _make_client()
-        if USE_AZURE_OPENAI:
-            _log(f"deployment {AZURE_DEPLOYMENT} via Azure OpenAI")
-        else:
-            _log(f"model {MODEL} via {'Microsoft Foundry' if USE_FOUNDRY else 'Claude API'}"
-                 + (f", fallback {FALLBACK_MODEL}" if USE_FOUNDRY and FALLBACK_MODEL else ""))
+    def __init__(self, session: ClientSession) -> None:
+        self.mcp = session
+        url = urlparse(os.getenv("AZURE_OPENAI_ENDPOINT", "").strip())
+        if not url.scheme or not url.netloc:
+            raise ValueError("Set AZURE_OPENAI_ENDPOINT in .env (e.g. https://<resource>.openai.azure.com/)")
+        # Only the host: a Foundry project / agent path pasted from the portal is rejected by the API.
+        self.llm = openai.AsyncAzureOpenAI(azure_endpoint=f"{url.scheme}://{url.netloc}/",
+                                           api_key=os.environ["AZURE_OPENAI_API_KEY"], api_version=API_VERSION)
+        self._tools: list[dict[str, Any]] | None = None
+        _log(f"deployment {DEPLOYMENT} via Azure OpenAI, tools from the MCP server")
 
-    # --- tools -----------------------------------------------------------------
-    def _handlers(self, charts: list[dict[str, Any]]) -> dict[str, Callable[..., Any]]:
-        m = self.mongo
-        idp = IdpFlow(m.database())
+    async def tools(self) -> list[dict[str, Any]]:
+        if self._tools is None:
+            listed = (await self.mcp.list_tools()).tools
+            self._tools = [{"type": "function", "function": {"name": t.name, "description": t.description or "",
+                                                              "parameters": t.inputSchema}}
+                           for t in listed if t.name in CHAT_TOOLS]
+        return self._tools
 
-        def list_collections() -> Any:
-            db = m.database()
-            return [{"collection": c["collection"], "type": c["type"],
-                     "approx_documents": db[c["collection"]].estimated_document_count()
-                     if c["type"] == "collection" else None} for c in m.list_collections()]
+    async def call(self, name: str, args: dict[str, Any]) -> tuple[Any, bool]:
+        """Call one of the chatbot's MCP tools; returns (result, is_error)."""
+        if name not in CHAT_TOOLS:
+            return f"unknown tool {name}", True
+        return await call_tool(self.mcp, name, args)
 
-        def create_chart(title: str, chart_type: str, collection: str, pipeline: str, x_field: str,
-                         y_fields: list[str], series_names: list[str] | None = None, unit: str = "") -> Any:
-            if len(charts) >= MAX_CHARTS:
-                return {"error": f"at most {MAX_CHARTS} charts per answer"}
-            rows = m.run_aggregate(collection, pipeline, None, 200)
-            if not rows:
-                return {"charted": False, "note": "The pipeline returned no rows, so no chart was added."}
-            charts.append(from_rows(title, chart_type, rows, x_field, y_fields, series_names, unit))
-            return {"charted": True, "row_count": len(rows), "rows": rows[:50]}
+    async def unknown_ids(self, args: dict[str, Any], known: set[str]) -> list[str]:
+        """Ids in a query that were never seen in the chat or a tool result and don't exist (invented)."""
+        missing = []
+        for i in ids_in(args) - known:
+            found, _ = await self.call("find_id", {"id": i})
+            if isinstance(found, dict) and found.get("rows"):
+                known.add(i)
+            else:
+                missing.append(i)
+        return missing
 
-        return {
-            "list_collections": list_collections,
-            "infer_collection_schema": lambda collection, sample_size=100:
-                m.infer_collection_schema(collection, None, sample_size),
-            "get_distinct_values": lambda collection, field_path, limit=50:
-                m.get_distinct_values(collection, field_path, None, limit),
-            "count_documents": lambda collection, filter="": m.count_documents(collection, None, filter),
-            "run_find": lambda collection, filter="", projection="", sort="", max_rows=50:
-                m.run_find(collection, filter, projection, sort, None, max_rows),
-            "run_aggregate": lambda collection, pipeline, max_rows=100:
-                m.run_aggregate(collection, pipeline, None, max_rows),
-            "get_inferred_relationships": lambda collection="":
-                m.get_inferred_relationships(collection, None, verify=True),
-            "idp_find_submissions": lambda source="", status="", search="", days=0, limit=20:
-                idp.find_submissions(source, status, search, days, limit),
-            "idp_get_submission": lambda submission_id, include_nodes=False:
-                idp.get_submission(submission_id, include_nodes),
-            "idp_get_run_details": lambda run_id, include_extracted_data=False:
-                idp.get_run_details(run_id, include_extracted_data, False),
-            "create_chart": create_chart,
-        }
-
-    @staticmethod
-    def _result_text(value: Any) -> str:
-        text = json.dumps(value, default=str, ensure_ascii=False)
-        if len(text) > MAX_RESULT_CHARS:
-            text = text[:MAX_RESULT_CHARS] + f'... [truncated: {len(text)} chars total - narrow the query]'
-        return text
-
-    # --- conversation ----------------------------------------------------------
-    def answer(self, history: list[dict[str, str]]) -> dict[str, Any]:
-        """history: [{"role": "user" | "assistant", "content": str}, ...] ending with the user's question.
-        Returns {"answer": markdown, "charts": [spec], "steps": [{"tool", "input", "ok"}]}."""
-        messages: list[dict[str, Any]] = [{"role": h["role"], "content": h["content"]}
-                                          for h in history if h.get("content")]
+    async def answer(self, history: list[dict[str, str]],
+                     emit: Callable[[str, Any], None] = lambda *_: None) -> dict[str, Any]:
+        """history ends with the user's question. emit(event, data) reports ("step", ...) / ("chart", ...) live.
+        Returns {"answer": markdown, "charts": [...], "steps": [...], "follow_ups": [...]}."""
+        msgs: list[dict[str, Any]] = [{"role": "system", "content": system_prompt()},
+                                      *({"role": h["role"], "content": h["content"]} for h in history if h["content"])]
         charts: list[dict[str, Any]] = []
         steps: list[dict[str, Any]] = []
-        handlers = self._handlers(charts)
-        if USE_AZURE_OPENAI:
-            return self._loop_openai(messages, charts, steps, handlers)
-        # Pins this question's follow-up requests to whichever model accepted (Foundry middleware).
-        with anthropic.BetaFallbackState():
-            return self._loop(messages, charts, steps, handlers)
+        sources = [h["content"] for h in history if h["role"] == "user"]  # what figures are checked against
+        known = ids_in([h["content"] for h in history])
+        corrections, text = 0, "I couldn't finish within the step limit - try a more specific question."
 
-    def _run_tool(self, name: str, args: dict[str, Any], handlers: dict[str, Callable[..., Any]],
-                  steps: list[dict[str, Any]]) -> tuple[str, bool]:
-        fn = handlers.get(name)
-        try:
-            if fn is None:
-                raise ValueError(f"unknown tool {name}")
-            content, is_error = self._result_text(fn(**args)), False
-        except Exception as ex:
-            content, is_error = f"{type(ex).__name__}: {ex}", True
-            _log(f"{name} failed: {content}")
-        steps.append({"tool": name, "input": args, "ok": not is_error})
-        return content, is_error
+        def attach(spec: dict[str, Any], replaces: str = "") -> None:
+            title = replaces or spec["title"]
+            charts[:] = [c for c in charts if c["title"] not in (title, spec["title"])
+                         and not c["title"].startswith(title + " - ")]
+            if len(charts) < MAX_CHARTS:
+                charts.append(spec)
+                emit("chart", spec)
 
-    def _loop_openai(self, messages: list[dict[str, Any]], charts: list[dict[str, Any]],
-                     steps: list[dict[str, Any]], handlers: dict[str, Callable[..., Any]]) -> dict[str, Any]:
-        msgs: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}, *messages]
         for _ in range(MAX_TURNS):
-            response = self.client.chat.completions.create(
-                model=AZURE_DEPLOYMENT, messages=msgs, tools=OPENAI_TOOLS, temperature=0, max_tokens=8000)
-            choice = response.choices[0]
+            kw = ({"max_completion_tokens": 16000, "reasoning_effort": REASONING_EFFORT} if REASONING
+                  else {"temperature": 0, "max_tokens": 8000})
+            choice = (await self.llm.chat.completions.create(
+                model=DEPLOYMENT, messages=msgs, tools=await self.tools(), **kw)).choices[0]
             msg = choice.message
             if choice.finish_reason == "content_filter":
-                return {"answer": "I can't help with that request.", "charts": charts, "steps": steps}
+                text = "I can't help with that request."
+                break
             if not msg.tool_calls:
                 text = msg.content or ""
+                problem = answer_problem(text, steps, charts, sources) if choice.finish_reason != "length" else None
+                if problem and corrections < MAX_CORRECTIONS:
+                    corrections += 1
+                    _log(f"answer sent back: {problem[:70]}")
+                    msgs += [{"role": "assistant", "content": text}, {"role": "system", "content": problem}]
+                    continue
                 if choice.finish_reason == "length":
                     text += "\n\n_(The answer was cut off - try a narrower question.)_"
-                return {"answer": text.strip(), "charts": charts, "steps": steps}
+                break
 
             msgs.append(msg.model_dump(exclude_none=True))
-            for call in msg.tool_calls:
+            for tc in msg.tool_calls:
+                name = tc.function.name
                 try:
-                    args = json.loads(call.function.arguments or "{}")
-                    content, _ = self._run_tool(call.function.name, args, handlers, steps)
-                except json.JSONDecodeError as ex:
-                    content = f"Invalid JSON arguments: {ex}"
-                msgs.append({"role": "tool", "tool_call_id": call.id, "content": content})
+                    args = json.loads(tc.function.arguments or "{}")
+                    invented = await self.unknown_ids(args, known) if name in DATA_TOOLS else []
+                    if invented:
+                        result, error = (f"id {', '.join(invented)} does not exist and was not returned by any tool. "
+                                         f"Never invent ids - look them up first."), True
+                    else:
+                        result, error = await self.call(name, args)
+                except ValueError as ex:
+                    args, result, error = {}, f"Invalid arguments: {ex}", True
+                if not error:
+                    known |= ids_in(result)
+                    self._auto_charts(name, args, result, attach)
+                content = result if isinstance(result, str) else json.dumps(result, default=str, ensure_ascii=False)
+                if len(content) > MAX_RESULT_CHARS:
+                    content = content[:MAX_RESULT_CHARS] + "... [truncated - narrow the query]"
+                if error:
+                    _log(f"{name} failed: {content[:200]}")
+                else:
+                    sources.append(content)
+                    if name in ("idp_get_submission", "idp_get_run_details", "list_collections"):
+                        content += "\n(A table/chart of this result is attached to the answer automatically.)"
+                step = {"tool": name, "input": args, "ok": not error}
+                if name in DATA_TOOLS and not error:
+                    step["empty"] = is_empty(result)
+                steps.append(step)
+                emit("step", step)
+                msgs.append({"role": "tool", "tool_call_id": tc.id, "content": content})
 
-        return {"answer": "I couldn't finish within the step limit - try a more specific question.",
-                "charts": charts, "steps": steps}
+        # A superseded trend with < 3 points is noise once other charts exist.
+        charts = [c for c in charts if not (c["type"] == "line" and len(c.get("labels") or []) < 3)] or charts
+        answer, follow_ups = split_follow_ups(text)
+        bad = unverified_numbers(answer, sources) if steps else []
+        if bad:
+            answer += f"\n\n> ⚠ Could not verify {', '.join(bad)} against the query results - check the charts."
+        return {"answer": answer, "charts": charts, "steps": steps, "follow_ups": follow_ups}
 
-    def _loop(self, messages: list[dict[str, Any]], charts: list[dict[str, Any]],
-              steps: list[dict[str, Any]], handlers: dict[str, Callable[..., Any]]) -> dict[str, Any]:
-        for _ in range(MAX_TURNS):
-            with self.client.beta.messages.stream(
-                model=MODEL,
-                max_tokens=16000,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=messages,
-                output_config={"effort": EFFORT},
-                cache_control={"type": "ephemeral"},
-                **self.fallback_args,
-            ) as stream:
-                response = stream.get_final_message()
-
-            if response.stop_reason == "refusal":
-                return {"answer": "I can't help with that request.", "charts": charts, "steps": steps}
-
-            text = "".join(b.text for b in response.content if b.type == "text")
-            if response.stop_reason != "tool_use":
-                if response.stop_reason == "max_tokens":
-                    text += "\n\n_(The answer was cut off - try a narrower question.)_"
-                return {"answer": text.strip(), "charts": charts, "steps": steps}
-
-            messages.append({"role": "assistant", "content": response.content})
-            results = []
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
-                content, is_error = self._run_tool(block.name, dict(block.input), handlers, steps)
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": content,
-                                "is_error": is_error})
-            messages.append({"role": "user", "content": results})
-
-        return {"answer": "I couldn't finish within the step limit - try a more specific question.",
-                "charts": charts, "steps": steps}
+    @staticmethod
+    def _auto_charts(name: str, args: dict[str, Any], result: Any, attach: Callable[..., None]) -> None:
+        """Charts that come with a tool result: build_chart's specs, and tables / counts for lookups."""
+        if name == "build_chart":
+            for i, spec in enumerate(result.get("charts", [])):
+                attach(spec, replaces=args.get("title", "") if i == 0 else "")  # a remade chart replaces the old one
+        elif name == "idp_get_submission":
+            attach(submission_table(result))
+        elif name == "idp_get_run_details":
+            attach(run_steps_table(result))
+        elif name == "list_collections":
+            top = sorted(result["rows"], key=lambda r: -(r.get("approx_documents") or 0))[:15]
+            attach({"title": "Collections in the database", "type": "kpi", "value": result["row_count"]})
+            attach({"title": "Largest collections (documents)", "type": "hbar", "labels": [r["collection"] for r in top],
+                    "series": [{"name": "Documents", "data": [r.get("approx_documents") for r in top]}]})

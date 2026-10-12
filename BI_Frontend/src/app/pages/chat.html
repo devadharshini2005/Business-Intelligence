@@ -1,0 +1,115 @@
+<div class="page-head">
+  <div>
+    <h1>Ask the data</h1>
+    <p class="sub">Answers come from the Intellidoc database, with charts built from the same queries.</p>
+  </div>
+  @if (store.messages().length) {
+    <button class="ghost" type="button" (click)="store.clear()" [disabled]="store.busy()">New chat</button>
+  }
+</div>
+
+<div class="thread" #thread>
+  @if (!store.messages().length) {
+    <div class="welcome">
+      <div class="hero">
+        <div class="hero-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.7L18.5 9.5 13.8 11.3 12 16l-1.8-4.7L5.5 9.5l4.7-1.8z" /><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" /></svg>
+        </div>
+        <h2>What would you like to know?</h2>
+        <p>Ask in plain English. You'll get a written answer plus charts built from your data.</p>
+      </div>
+      <div class="groups">
+        @for (g of suggestions; track g.group) {
+          <div class="group">
+            <h4>{{ g.group }}</h4>
+            @for (q of g.questions; track q) {
+              <button type="button" class="suggestion" (click)="send(q)">{{ q }}</button>
+            }
+          </div>
+        }
+      </div>
+    </div>
+  }
+
+  @for (m of store.messages(); track $index; let i = $index; let last = $last) {
+    @if (m.role === 'user') {
+      <div class="msg user">
+        <div class="bubble">{{ m.content }}</div>
+      </div>
+    } @else {
+      <div class="msg assistant" [class.error]="m.error">
+        <div class="avatar" aria-hidden="true">AI</div>
+        <div class="body">
+          @if (m.pending) {
+            <div class="progress" aria-live="polite">
+              <div class="thinking"><span></span><span></span><span></span>
+                {{ m.steps?.length ? 'Working on it…' : 'Reading your question…' }}
+              </div>
+              <ol class="live-steps">
+                @for (s of m.steps ?? []; track $index) {
+                  <li [class.failed]="!s.ok">
+                    <span class="tick" aria-hidden="true">{{ s.ok ? '✓' : '!' }}</span>{{ describe(s) }}
+                  </li>
+                }
+              </ol>
+            </div>
+          } @else {
+            <div class="md" [innerHTML]="md(m.content)"></div>
+          }
+
+          @if (m.charts?.length) {
+            <div class="charts" [class.single]="m.charts!.length === 1">
+              @for (c of m.charts!; track $index) {
+                <app-chart-card [spec]="c" [class.wide]="c.type === 'table' || c.type === 'line'" />
+              }
+            </div>
+          }
+
+          @if (!m.pending) {
+            <div class="meta">
+              @if (m.error) {
+                @if (last) { <button type="button" class="link" (click)="store.retry()">Retry</button> }
+              } @else {
+                <button type="button" class="link" (click)="copy(m.content, i)">{{ copied() === i ? 'Copied' : 'Copy' }}</button>
+                @if (m.steps?.length) {
+                  <details class="steps">
+                    <summary>{{ m.steps!.length }} database {{ m.steps!.length === 1 ? 'step' : 'steps' }}</summary>
+                    <ol>
+                      @for (s of m.steps!; track $index) {
+                        <li [class.failed]="!s.ok">
+                          <span>{{ describe(s) }}</span>
+                          <pre>{{ s.input | json }}</pre>
+                        </li>
+                      }
+                    </ol>
+                  </details>
+                }
+              }
+              @if (m.at) { <span class="time">{{ m.at | date: 'shortTime' }}</span> }
+            </div>
+
+            @if (last && m.followUps?.length) {
+              <div class="follow-ups">
+                @for (f of m.followUps!; track f) {
+                  <button type="button" class="suggestion small" (click)="send(f)">{{ f }}</button>
+                }
+              </div>
+            }
+          }
+        </div>
+      </div>
+    }
+  }
+</div>
+
+<form class="composer" (ngSubmit)="send(draft())">
+  <textarea name="q" rows="1" placeholder="Ask a question about your data…"
+            [ngModel]="draft()" (ngModelChange)="draft.set($event)" (keydown.enter)="onEnter($event)"
+            aria-label="Question"></textarea>
+  @if (store.busy()) {
+    <button type="button" class="ghost stop" (click)="store.stop()">Stop</button>
+  } @else {
+    <button type="submit" class="primary" [disabled]="!draft().trim()">Send</button>
+  }
+</form>
+<p class="disclaimer">Read-only: the assistant can't change data. Check important figures with the queries under each answer.</p>

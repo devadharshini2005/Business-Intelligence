@@ -1,0 +1,475 @@
+/* Design tokens. Chart colors follow a CVD-validated categorical order; status colors
+   are reserved for state (good / warning / critical) and never used as a series. */
+:root {
+  color-scheme: light;
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  --page: #f6f6f4;
+  --sidebar-bg: #fcfcfb;
+  --surface-1: #fcfcfb;
+  --surface-3: #e5e4e0;
+  --surface-2: #f0efec;
+  --hover: #efeee9;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #77756f;
+  --grid: #e7e6e0;
+  --border: rgba(11, 11, 11, 0.1);
+  --border-strong: rgba(11, 11, 11, 0.18);
+
+  /* Teal accent - the one deliberate departure from the Property Guidelines blue, so the two
+     products read as siblings rather than the same app. Series colours stay blue-first. */
+  --accent: #0e7c86;
+  --accent-strong: #0a5f67;
+  --accent-soft: #dff1f2;
+  --on-accent: #ffffff;
+  --radius: 10px;
+
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
+
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-critical: #d03b3b;
+  --status-critical-text: #b42323;
+  --status-good-text: #006300;
+  --status-warning-text: #8a5a00;
+
+  --shadow-sm: 0 1px 3px rgba(11, 11, 11, 0.06), 0 1px 2px rgba(11, 11, 11, 0.04);
+  --shadow-lg: 0 12px 40px rgba(11, 11, 11, 0.18);
+}
+
+@mixin dark-tokens {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --sidebar-bg: #141413;
+  --surface-1: #1a1a19;
+  --surface-2: #232322;
+  --surface-3: #2e2e2c;
+  --hover: #24241f;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #8f8d86;
+  --grid: #2c2c2a;
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.2);
+
+  --accent: #2bb3bf;
+  --accent-strong: #6fd0d8;
+  --accent-soft: #0f2e30;
+  --on-accent: #0d0d0d;
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+
+  --status-critical-text: #f07c7c;
+  --status-good-text: #4cc94c;
+  --status-warning-text: #fab219;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    @include dark-tokens;
+  }
+}
+:root[data-theme='dark'] {
+  @include dark-tokens;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 14px;
+  background: var(--page);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+h1 {
+  font-size: 18px;
+  margin: 0;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+/* Routed pages fill the main column (the chat page needs a fixed height to scroll its thread). */
+main > app-chat {
+  flex: 1;
+  min-height: 0;
+}
+
+/* --- page frame -------------------------------------------------------------
+   Pages are a sticky filter bar over a padded body, as in Property Guidelines. */
+.page-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+}
+
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 16px 16px 0;
+
+  .sub {
+    margin: 4px 0 0;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+}
+
+.filter-bar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--page) 94%, transparent);
+  backdrop-filter: blur(6px);
+
+  .trail {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 2px;
+  }
+}
+
+/* A labelled control: label above, input/select below. */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  > span {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+
+  select,
+  input {
+    height: 34px;
+    min-width: 0;
+    padding: 0 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 7px;
+    background: var(--surface-1);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+
+    &:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    }
+  }
+}
+
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 2px rgba(11, 11, 11, 0.05);
+  padding: 16px;
+}
+
+/* --- badges & notes ------------------------------------------------------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+
+  &.accent {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+    color: var(--accent);
+  }
+  &.good {
+    background: color-mix(in srgb, var(--status-good) 12%, transparent);
+    border-color: color-mix(in srgb, var(--status-good) 28%, transparent);
+    color: var(--status-good-text);
+  }
+  &.warning {
+    background: color-mix(in srgb, var(--status-warning) 14%, transparent);
+    border-color: color-mix(in srgb, var(--status-warning) 34%, transparent);
+    color: var(--status-warning-text);
+  }
+  &.critical {
+    background: color-mix(in srgb, var(--status-critical) 11%, transparent);
+    border-color: color-mix(in srgb, var(--status-critical) 30%, transparent);
+    color: var(--status-critical-text);
+  }
+  &.mono {
+    font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  }
+}
+
+.caveat {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-muted);
+
+  &::before {
+    content: 'ⓘ';
+    color: var(--status-warning);
+  }
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 40px 24px;
+  text-align: center;
+
+  strong {
+    font-size: 14px;
+    font-weight: 500;
+  }
+  p {
+    margin: 0;
+    max-width: 440px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-muted);
+  }
+}
+
+/* --- buttons ---------------------------------------------------------------- */
+button {
+  font: inherit;
+}
+
+button.ghost,
+button.primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 7px;
+  padding: 7px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  &:hover:not(:disabled) {
+    background: var(--hover);
+  }
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  &.small {
+    padding: 3px 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  &.bare {
+    border-color: transparent;
+    background: transparent;
+    color: var(--text-secondary);
+  }
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  &:hover:not(:disabled) {
+    background: var(--accent-strong);
+    border-color: var(--accent-strong);
+  }
+}
+
+.segmented {
+  display: inline-flex;
+  height: 34px;
+  padding: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-2);
+
+  button {
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    padding: 0 12px;
+    font-size: 13px;
+    cursor: pointer;
+    &.active {
+      background: var(--surface-1);
+      color: var(--accent);
+      font-weight: 600;
+      box-shadow: 0 1px 2px rgba(11, 11, 11, 0.08);
+    }
+  }
+}
+
+svg.icon {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.banner {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  &.error {
+    background: color-mix(in srgb, var(--status-critical) 12%, transparent);
+    color: var(--status-critical-text);
+    border: 1px solid color-mix(in srgb, var(--status-critical) 35%, transparent);
+  }
+}
+
+.skeleton {
+  border-radius: var(--radius);
+  background: var(--surface-3);
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* --- data tables (submissions, catalog) ---------------------------------- */
+table.grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+
+  th,
+  td {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--grid);
+    white-space: nowrap;
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  th {
+    position: sticky;
+    top: 0;
+    background: var(--surface-2);
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .r {
+    text-align: right;
+  }
+  tbody tr.clickable {
+    cursor: pointer;
+    &:hover td,
+    &:focus-visible td {
+      background: var(--hover);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

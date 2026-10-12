@@ -1,0 +1,65 @@
+<div class="filter-bar">
+  <div class="field">
+    <span>Period</span>
+    <div class="segmented" role="group" aria-label="Time range">
+      @for (r of ranges; track r.days) {
+        <button type="button" [class.active]="days() === r.days" [attr.aria-pressed]="days() === r.days"
+                (click)="load(r.days)">{{ r.label }}</button>
+      }
+    </div>
+  </div>
+
+  <div class="title">
+    <h1>Overview</h1>
+    <p>Intellidoc IDP · {{ rangeText() }}</p>
+  </div>
+
+  <div class="trail">
+    @if (data(); as d) {
+      <span class="updated num">Updated {{ d.generated_at | date: 'HH:mm' }}</span>
+    }
+    <span class="badge accent mono" title="Every tile and chart on this page comes from this MCP tool">MCP · get_dashboard</span>
+    <button class="ghost" type="button" (click)="load(days())" [disabled]="loading()">
+      <svg class="icon" [class.spin]="loading()" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" /></svg>
+      Refresh
+    </button>
+  </div>
+</div>
+
+<div class="page-body">
+  @if (error()) {
+    <div class="card">
+      <div class="empty-state">
+        <strong>The dashboard could not be loaded</strong>
+        <p>{{ error() }}</p>
+        <p>Nothing is shown in its place — this page only displays what the MCP server returns.</p>
+        <button class="primary" type="button" (click)="load(days())">Try again</button>
+      </div>
+    </div>
+  }
+
+  @if (loading() && !data()) {
+    <div class="kpis">@for (i of [1, 2, 3, 4, 5, 6, 7]; track i) { <div class="skeleton kpi-sk"></div> }</div>
+    <div class="grid">@for (i of [1, 2, 3, 4]; track i) { <div class="skeleton chart-sk"></div> }</div>
+  }
+
+  @if (data(); as d) {
+    <div class="kpis" [class.dim]="loading()">
+      @for (k of d.kpis; track k.title) { <app-chart-card [spec]="k" /> }
+    </div>
+    @if (d.kpi_error) { <div class="banner error">KPIs: {{ d.kpi_error }}</div> }
+    @if (!d.days) { <p class="caveat">All time: there is no previous period to compare against, so tiles show totals only.</p> }
+
+    <div class="grid" [class.dim]="loading()">
+      @for (c of d.charts; track c.id) {
+        <app-chart-card [spec]="c" [askable]="true" source="get_dashboard" (ask)="askAbout($event)"
+                        (rowClick)="openSubmission.set($event)"
+                        [class.wide]="c.type === 'line' || c.type === 'table'" />
+      }
+    </div>
+  }
+</div>
+
+@if (openSubmission(); as id) {
+  <app-submission-panel [submissionId]="id" (closed)="openSubmission.set(null)" (ask)="askChat($event)" />
+}

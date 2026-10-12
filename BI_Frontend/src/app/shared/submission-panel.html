@@ -1,0 +1,114 @@
+<div class="backdrop" (click)="close()"></div>
+<aside class="panel" role="dialog" aria-modal="true" aria-label="Submission details">
+  <header>
+    <div class="head-text">
+      <span class="eyebrow">Submission</span>
+      @if (data(); as d) {
+        <h2>{{ title(d) }}</h2>
+      } @else {
+        <h2>{{ submissionId() }}</h2>
+      }
+    </div>
+    <button class="close" type="button" (click)="close()" aria-label="Close">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+    </button>
+  </header>
+
+  <div class="body">
+    @if (loading()) {
+      <div class="skeleton" style="height: 90px"></div>
+      <div class="skeleton" style="height: 160px"></div>
+    }
+    @if (error()) {
+      <div class="banner error">{{ error() }}</div>
+    }
+
+    @if (data(); as d) {
+      <div class="chips">
+        <span class="chip">{{ sourceLabel(d.source) }}</span>
+        <span [class]="statusClass(d.totals.run_status)">{{ d.totals.run_status }}</span>
+        <span class="chip mono" [title]="'Submission id'">{{ d.submission_id }}</span>
+      </div>
+
+      <dl class="fields">
+        @for (f of headerFields(d); track f.label) {
+          <div>
+            <dt>{{ f.label }}</dt>
+            <dd>
+              @if (isDate(f.value)) { {{ $any(f.value) | date: 'medium' }} }
+              @else if (f.label === 'Status') { <span [class]="statusClass($any(f.value))">{{ f.value }}</span> }
+              @else { {{ f.value }} }
+            </dd>
+          </div>
+        }
+      </dl>
+
+      <div class="totals">
+        <div><strong>{{ d.totals.files }}</strong><span>files</span></div>
+        <div><strong>{{ d.totals.runs }}</strong><span>runs</span></div>
+        @for (s of d.totals.runs_by_status | keyvalue; track s.key) {
+          <div><strong>{{ s.value }}</strong><span [class]="statusClass(s.key)">{{ s.key }}</span></div>
+        }
+      </div>
+
+      <button class="ask" type="button" (click)="askAbout(d)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 4.7L18.5 9.5 13.8 11.3 12 16l-1.8-4.7L5.5 9.5l4.7-1.8z" /></svg>
+        Ask AI to explain this submission
+      </button>
+
+      @if (d.note) { <p class="note">{{ d.note }}</p> }
+
+      <h3>Files</h3>
+      @for (f of d.files; track f.file_id) {
+        <section class="file">
+          <div class="file-head">
+            <div class="file-name">
+              <span class="ext">{{ (f.file_type || '?').toUpperCase() }}</span>
+              <span class="name" [title]="f.filename ?? ''">{{ f.filename || f.file_id }}</span>
+            </div>
+            <span [class]="statusClass(f.run_status)">{{ f.run_status }}</span>
+          </div>
+          <div class="file-meta">
+            @if (f.pages) { <span>{{ f.pages }} pages</span> }
+            @if (f.file_size) { <span>{{ f.file_size / 1024 | number: '1.0-0' }} KB</span> }
+            @if (f.origin !== 'submission') { <span>{{ f.origin }}</span> }
+          </div>
+
+          @for (r of f.runs; track r.run_id) {
+            <div class="run">
+              <div class="run-head">
+                <span class="process">{{ r.process || 'Unknown process' }}</span>
+                <span [class]="statusClass(r.status)">{{ r.status }}</span>
+              </div>
+              @if (progress(r); as p) {
+                @if (p.total) {
+                  <div class="bar" role="progressbar" [attr.aria-valuenow]="p.pct" aria-valuemin="0" aria-valuemax="100">
+                    <span [style.width.%]="p.pct" [class.done]="p.pct === 100"></span>
+                  </div>
+                  <div class="run-meta">
+                    <span>{{ p.done }}/{{ p.total }} steps completed</span>
+                    @if (confidence(r.confidence_score); as c) { <span>confidence {{ c | number: '1.0-1' }}%</span> }
+                    @if (r.duration_s) { <span>{{ r.duration_s | number: '1.0-1' }} s</span> }
+                  </div>
+                }
+              }
+              @if (r.current_step && !attentionAt(r, r.current_step.step)) {
+                <div class="step-note warning">Now at step {{ r.current_step.step }}: {{ r.current_step.name }} ({{ label(r.current_step.status) }})</div>
+              }
+              @for (n of r.needs_attention ?? []; track n.step) {
+                <div class="step-note" [class.warning]="n.status === 'awaiting_approval'" [class.critical]="n.status !== 'awaiting_approval'">
+                  Step {{ n.step }} · {{ n.name }} — {{ label(n.status) }}@if (n.error) {: {{ n.error }}}
+                </div>
+              }
+              @if (r.error_message) { <div class="step-note critical">{{ r.error_message }}</div> }
+            </div>
+          } @empty {
+            <p class="muted">No runs for this file.</p>
+          }
+        </section>
+      } @empty {
+        <p class="muted">No files.</p>
+      }
+    }
+  </div>
+</aside>

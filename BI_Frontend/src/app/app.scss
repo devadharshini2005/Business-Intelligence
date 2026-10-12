@@ -1,0 +1,377 @@
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* --- top bar ---------------------------------------------------------------- */
+.topbar {
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  background: var(--sidebar-bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  color: inherit;
+  text-decoration: none;
+}
+
+.mark {
+  width: 24px;
+  height: 24px;
+  rect {
+    fill: var(--accent);
+  }
+  path {
+    fill: none;
+    stroke: var(--on-accent);
+    stroke-width: 2.4;
+    stroke-linecap: round;
+  }
+}
+
+.wordmark {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  strong {
+    font-size: 14px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+  }
+  small {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+}
+
+nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+
+  a {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 7px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: background 0.12s, color 0.12s;
+
+    &:hover {
+      background: var(--surface-2);
+      color: var(--text-primary);
+    }
+    &.active {
+      background: color-mix(in srgb, var(--accent) 11%, transparent);
+      color: var(--accent);
+    }
+    .icon {
+      width: 14px;
+      height: 14px;
+    }
+  }
+}
+
+.busy-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.2s infinite ease-in-out;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.askbox {
+  margin-left: auto;
+  flex: 1 1 auto;
+  max-width: 440px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-1);
+  transition: border-color 0.12s, box-shadow 0.12s;
+
+  &:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  .icon {
+    color: var(--accent);
+  }
+  input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+  }
+  kbd {
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    font: inherit;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+}
+
+.tools {
+  display: flex;
+  gap: 2px;
+  flex: none;
+}
+
+.icon-only {
+  position: relative;
+  padding: 7px !important;
+  .icon {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+.status-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid var(--sidebar-bg);
+  background: var(--text-muted);
+  &.ok {
+    background: var(--status-good);
+  }
+  &.bad {
+    background: var(--status-critical);
+  }
+}
+
+/* --- body ------------------------------------------------------------------- */
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- source panel ----------------------------------------------------------- */
+.source {
+  width: 288px;
+  flex: none;
+  overflow-y: auto;
+  padding: 12px;
+  background: var(--sidebar-bg);
+  border-left: 1px solid var(--border);
+  font-size: 12px;
+
+  h2,
+  h3 {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+  }
+
+  section {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    h3 {
+      margin-bottom: 8px;
+    }
+  }
+
+  code {
+    font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+    font-size: 11px;
+  }
+}
+
+.source-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+/* UI -> API -> MCP -> DB: the only path data takes. */
+.flow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+
+  span {
+    white-space: nowrap;
+  }
+  .hl {
+    padding: 1px 6px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  i {
+    flex: 1;
+    min-width: 6px;
+    height: 1px;
+    background: var(--border-strong);
+  }
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+
+  > div {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 2px 8px;
+  }
+  dt {
+    color: var(--text-secondary);
+  }
+  dd {
+    margin: 0;
+  }
+}
+
+.detail {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+  &.mono {
+    font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  }
+}
+
+.calls {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    &.failed code {
+      color: var(--status-critical-text);
+    }
+  }
+  code {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+  }
+  .meta {
+    margin-left: auto;
+    flex: none;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+}
+
+.dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-critical);
+  &.ok {
+    background: var(--status-good);
+  }
+}
+
+.notes {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+@media (max-width: 1100px) {
+  .wordmark small,
+  .askbox kbd {
+    display: none;
+  }
+}
+
+@media (max-width: 860px) {
+  .topbar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .askbox {
+    order: 3;
+    flex-basis: 100%;
+    max-width: none;
+  }
+  nav a span {
+    display: none;
+  }
+  .source {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    box-shadow: var(--shadow-lg);
+  }
+}

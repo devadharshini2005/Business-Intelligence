@@ -1,62 +1,68 @@
-"""HTTP API for the BI frontend (Angular): analytics dashboard + chatbot.
+"""HTTP API for the Angular frontend. Everything goes through the MCP server: on start-up this app
+launches mcp_server.py (the same read-only server Copilot uses) and calls its tools over MCP.
 
-Read-only, like the MCP server: it reuses the same MongoDB client and IDP
-tools. Run from this folder:
+    python api_server.py        (= uvicorn api_server:app --reload --port 8000)
 
-    uvicorn api_server:app --reload --port 8000
-
-Endpoints
-  GET  /api/health                 database reachable? chatbot configured?
-  GET  /api/dashboard?days=30      KPIs + charts for the dashboard
-  POST /api/chat                   {"messages": [{"role": "user"|"assistant", "content": str}]}
-                                   -> {"answer": markdown, "charts": [chart spec], "steps": [...]}
+  GET  /api/health                 database reachable? chatbot configured?        (MCP: ping_db)
+  GET  /api/dashboard?days=30      KPI tiles + charts                              (MCP: get_dashboard)
+  GET  /api/mcp                    MCP server, transport and tool list for the source panel (MCP: list_tools,
+                                   server_info)
+  GET  /api/submissions?source=&status=&search=&days=&limit=
+                                   submission list, newest first                   (MCP: idp_find_submissions)
+  GET  /api/collections            collections with approximate document counts    (MCP: list_collections)
+  GET  /api/collections/{c}/schema inferred fields and types of one collection    (MCP: infer_collection_schema)
+  GET  /api/submissions/{id}       one submission (or file / run id) for the panel (MCP: idp_get_submission)
+  POST /api/chat/stream            {"messages": [{"role", "content"}]} -> server-sent events:
+                                   step / chart while the answer is built, then done {answer, charts, steps,
+                                   follow_ups} or error {detail}                   (MCP: chat_agent tools)
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Any, AsyncIterator, Literal
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+HERE = Path(__file__).resolve().parent
+load_dotenv(HERE / ".env", override=True)
 
-import anthropic  # noqa: E402
 import openai  # noqa: E402
 from fastapi import FastAPI, HTTPException, Query  # noqa: E402
-from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import StreamingResponse  # noqa: E402
+from mcp import ClientSession, StdioServerParameters  # noqa: E402
+from mcp.client.stdio import stdio_client  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
-from chat_agent import ChatAgent  # noqa: E402
-from dashboard import Dashboard  # noqa: E402
-from mongo_db import MongoMetadataClient  # noqa: E402
-
-app = FastAPI(title="Actuvara BI API", version="1.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:4200").split(",") if o.strip()],
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
-
-_mongo: MongoMetadataClient | None = None
-_agent: ChatAgent | None = None
+from chat_agent import ChatAgent, call_tool  # noqa: E402
 
 
-def _db() -> MongoMetadataClient:
-    global _mongo
-    if _mongo is None:
-        _mongo = MongoMetadataClient()
-    return _mongo
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    server = StdioServerParameters(command=sys.executable, args=[str(HERE / "mcp_server.py")], cwd=str(HERE))
+    async with stdio_client(server) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        app.state.mcp = session
+        app.state.agent = ChatAgent(session) if os.getenv("AZURE_OPENAI_API_KEY") else None
+        yield
 
 
-def _chat() -> ChatAgent:
-    global _agent
-    if _agent is None:
-        _agent = ChatAgent(_db())
-    return _agent
+app = FastAPI(title="Actuvara BI API", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_methods=["GET", "POST"], allow_headers=["*"],
+                   allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:4200").split(","))
+
+
+async def mcp_tool(name: str, args: dict[str, Any], not_found: bool = False) -> Any:
+    """Call an MCP tool for an endpoint; a tool error becomes 404 (lookups) or 503."""
+    data, error = await call_tool(app.state.mcp, name, args)
+    if error:
+        raise HTTPException(404 if not_found and "found" in str(data) else 503, f"{name}: {data}")
+    return data
 
 
 class ChatMessage(BaseModel):
@@ -69,46 +75,101 @@ class ChatRequest(BaseModel):
 
 
 @app.get("/api/health")
-def health() -> dict:
-    out = {"database": False, "chat_configured": bool(
-        os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("ANTHROPIC_FOUNDRY_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN"))}
-    try:
-        out["database"] = _db().ping()
-        out["database_name"] = _db().default_database
-    except Exception as ex:
-        out["database_error"] = f"{type(ex).__name__}: {ex}"
-    return out
+async def health() -> dict:
+    ping, _ = await call_tool(app.state.mcp, "ping_db", {})
+    ping = ping if isinstance(ping, dict) else {}
+    return {"database": bool(ping.get("connected")), "database_error": ping.get("error"),
+            "database_name": os.getenv("MONGODB_DATABASE", ""), "chat_configured": app.state.agent is not None}
 
 
 @app.get("/api/dashboard")
-def dashboard(days: int = Query(30, ge=0, le=3650)) -> dict:
-    try:
-        return Dashboard(_db().database()).build(days)
-    except Exception as ex:
-        raise HTTPException(503, f"Database unavailable: {type(ex).__name__}: {ex}") from ex
+async def dashboard(days: int = Query(30, ge=0, le=3650)) -> dict:
+    return await mcp_tool("get_dashboard", {"days": days})
 
 
-@app.post("/api/chat")
-async def chat(req: ChatRequest) -> dict:
+@app.get("/api/mcp")
+async def mcp_info() -> dict:
+    tools = await app.state.mcp.list_tools()
+    info, error = await call_tool(app.state.mcp, "server_info", {})
+    return {"server": "actuvara-cosmos-db", "transport": "stdio", "server_info": None if error else info,
+            "tools": [{"name": t.name, "description": (t.description or "").strip().split("\n")[0]}
+                      for t in tools.tools]}
+
+
+@app.get("/api/submissions")
+async def submissions(source: str = "", status: str = "", search: str = "",
+                      days: int = Query(0, ge=0, le=3650), limit: int = Query(50, ge=1, le=200)) -> dict:
+    return await mcp_tool("idp_find_submissions",
+                          {"source": source, "status": status, "search": search, "days": days, "limit": limit})
+
+
+@app.get("/api/collections")
+async def collections() -> dict:
+    return await mcp_tool("list_collections", {})
+
+
+@app.get("/api/collections/{collection}/schema")
+async def collection_schema(collection: str) -> dict:
+    return await mcp_tool("infer_collection_schema", {"collection": collection, "sample_size": 100}, not_found=True)
+
+
+@app.get("/api/submissions/{submission_id}")
+async def submission(submission_id: str) -> dict:
+    return await mcp_tool("idp_get_submission", {"submission_id": submission_id}, not_found=True)
+
+
+def _chat_error(ex: Exception) -> str:
+    if isinstance(ex, openai.AuthenticationError):
+        return "Model key rejected (401): check AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT in BI_Backend/.env"
+    if isinstance(ex, openai.NotFoundError):
+        return "Model deployment not found (404): check AZURE_OPENAI_DEPLOYMENT in BI_Backend/.env"
+    if isinstance(ex, openai.RateLimitError):
+        return "The assistant is busy (rate limited) - try again in a minute"
+    if isinstance(ex, openai.APIConnectionError):
+        return "Could not reach the model endpoint - check AZURE_OPENAI_ENDPOINT in BI_Backend/.env"
+    if isinstance(ex, openai.APIStatusError):
+        return f"Model API error ({ex.status_code}): {str(ex.message)[:300]}"
+    return f"{type(ex).__name__}: {ex}"
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(req: ChatRequest) -> StreamingResponse:
     if req.messages[-1].role != "user":
         raise HTTPException(400, "The last message must be the user's question")
-    try:
-        return await run_in_threadpool(_chat().answer, [m.model_dump() for m in req.messages])
-    except (anthropic.AuthenticationError, openai.AuthenticationError) as ex:
-        raise HTTPException(500, "Model key rejected (401): check the API key and endpoint in BI_Backend/.env "
-                                 "- they must come from the same resource") from ex
-    except (anthropic.NotFoundError, openai.NotFoundError) as ex:
-        raise HTTPException(500, "Model deployment not found (404): check AZURE_OPENAI_DEPLOYMENT / CHAT_MODEL "
-                                 "and the endpoint in BI_Backend/.env") from ex
-    except (anthropic.RateLimitError, openai.RateLimitError) as ex:
-        raise HTTPException(429, "The assistant is busy (rate limited) - try again in a minute") from ex
-    except (anthropic.APIConnectionError, openai.APIConnectionError) as ex:
-        print(f"[actuvara-api] connection failed: {ex.__cause__ or ex}", file=sys.stderr, flush=True)
-        raise HTTPException(502, "Could not reach the model endpoint - check the endpoint / resource name "
-                                 "in BI_Backend/.env") from ex
-    except (anthropic.APIStatusError, openai.APIStatusError) as ex:
-        print(f"[actuvara-api] model API error {ex.status_code}: {ex.message}", file=sys.stderr, flush=True)
-        raise HTTPException(502, f"Model API error ({ex.status_code}): {str(ex.message)[:300]}") from ex
-    except Exception as ex:
-        print(f"[actuvara-api] chat failed: {type(ex).__name__}: {ex}", file=sys.stderr, flush=True)
-        raise HTTPException(500, f"{type(ex).__name__}: {ex}") from ex
+    if app.state.agent is None:
+        raise HTTPException(500, "Chatbot not configured: set AZURE_OPENAI_API_KEY in BI_Backend/.env")
+    events: asyncio.Queue[tuple[str, Any] | None] = asyncio.Queue()
+
+    async def work() -> None:
+        try:
+            history = [m.model_dump() for m in req.messages]
+            events.put_nowait(("done", await app.state.agent.answer(history, emit=lambda *e: events.put_nowait(e))))
+        except Exception as ex:
+            print(f"[actuvara-api] chat failed: {ex!r}", file=sys.stderr, flush=True)
+            events.put_nowait(("error", {"detail": _chat_error(ex)}))
+        finally:
+            events.put_nowait(None)
+
+    async def stream() -> AsyncIterator[str]:
+        task = asyncio.create_task(work())
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(events.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"  # stops proxies closing an idle connection
+                    continue
+                if item is None:
+                    return
+                yield f"event: {item[0]}\ndata: {json.dumps(item[1], default=str)}\n\n"
+        finally:
+            task.cancel()  # the browser went away (Stop / closed tab)
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("api_server:app", host="127.0.0.1", port=int(os.getenv("BI_API_PORT", "8000")), reload=True)

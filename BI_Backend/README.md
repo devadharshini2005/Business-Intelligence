@@ -10,9 +10,9 @@ read can write) and server-side JavaScript (`$where`, `$function`, `$accumulator
 
 Copilot is the AI; this server is only its toolbox. The MCP server itself has no HTTP API and no LLM.
 
-The same read-only code also powers the **BI API** (`api_server.py`) used by the Angular
-frontend in `../BI_Frontend`: an analytics dashboard and a chatbot (Claude) that answers
-questions from the database with text plus charts – see [BI API](#bi-api-for-the-angular-frontend).
+The **BI API** (`api_server.py`) used by the Angular frontend in `../BI_Frontend` is an MCP *client* of
+this server: it starts `mcp_server.py` and gets everything - dashboard, submission details, chatbot
+answers and charts - through these MCP tools. See [BI API](#bi-api-for-the-angular-frontend).
 
 ## Files
 
@@ -22,10 +22,10 @@ questions from the database with text plus charts – see [BI API](#bi-api-for-t
 | `idp_flow.py` | Actuvara IDP-specific tools: submission → files → runs → workflow nodes |
 | `query_guard.py` | Parses JSON filters/pipelines and rejects write stages and server-side JavaScript |
 | `mcp_server.py` | The MCP server: exposes the tools to Copilot over stdio |
-| `api_server.py` | BI HTTP API (FastAPI) for the Angular frontend: `/api/dashboard`, `/api/chat`, `/api/health` |
-| `dashboard.py` | Fixed read-only aggregations behind the dashboard (KPIs, trends, breakdowns) |
-| `chat_agent.py` | Chatbot: Claude + the read-only tools + `create_chart` |
-| `charts.py` | Turns aggregation rows into chart specs (shared by dashboard and chatbot) |
+| `api_server.py` | BI HTTP API for the Angular frontend - an MCP client of `mcp_server.py` |
+| `chat_agent.py` | Chatbot: Azure OpenAI (gpt-5) calling the MCP tools, plus the checks every answer must pass |
+| `dashboard.py` | Fixed read-only aggregations behind the `get_dashboard` tool |
+| `charts.py` | Turns aggregation rows into chart specs (`build_chart`, dashboard) |
 | `.vscode/mcp.json` | Registers the server with Copilot in VS Code |
 | `.mcp.json` | Registers the same server with Claude Code |
 | `.claude/settings.local.json` | Pre-approves that server in Claude Code (local, not shared) |
@@ -99,6 +99,9 @@ the same `mcp_server.py`, so they share one implementation and one `.env`).
 | `get_distinct_values` | Distinct values of a field with counts (e.g. all `status` values) |
 | `run_find` | Read documents: JSON `filter`, `projection`, `sort`, `max_rows` |
 | `run_aggregate` | One read-only aggregation pipeline (JSON array) |
+| `find_id` | Which collection(s) hold a document with a given `_id` |
+| `build_chart` | Chart spec(s) built from one aggregation - every number comes from the data |
+| `get_dashboard` | The IDP analytics dashboard (KPIs + charts) for the last N days |
 
 ## IDP submission tools (Actuvara / intellidoc)
 
@@ -124,29 +127,23 @@ Example questions: *"Show the latest webhook submissions"*, *"What happened to s
 
 ## BI API (for the Angular frontend)
 
-`api_server.py` serves the dashboard and the chatbot to `../BI_Frontend`. It uses the same
-read-only `MongoMetadataClient` / `IdpFlow` code as the MCP server.
+```powershell
+python api_server.py          # http://127.0.0.1:8000 - starts mcp_server.py itself
+```
 
-1. In `.env` (see `.env.example`), next to `MONGODB_URI`, set the chatbot's model access - one of:
-   - **Azure OpenAI** (e.g. GPT-4.1 in Azure AI Foundry): `AZURE_OPENAI_API_KEY`,
-     `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`
-   - **Claude on Foundry**: `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_RESOURCE`,
-     `CHAT_MODEL=<Claude deployment name>`
-   - **Claude API**: `ANTHROPIC_API_KEY`
-2. `pip install -r requirements.txt`
-3. Run it:
+Set `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_ENDPOINT` in `.env` (see `.env.example`); the chatbot uses
+the `gpt-5` deployment unless `AZURE_OPENAI_DEPLOYMENT` says otherwise. **Don't** run `mcp_server.py`
+for the app - `api_server.py` launches it as an MCP subprocess, exactly as Copilot does.
 
-   ```powershell
-   uvicorn api_server:app --reload --port 8000
-   ```
-
-| Endpoint | Returns |
+| Endpoint | MCP tool(s) |
 |---|---|
-| `GET /api/health` | Database reachable? Chatbot key set? |
-| `GET /api/dashboard?days=30` | KPI tiles + charts (`days=0` = all time) |
-| `POST /api/chat` | `{"messages": [{"role": "user", "content": "..."}]}` → `{"answer", "charts", "steps"}` |
+| `GET /api/health` | `ping_db` |
+| `GET /api/dashboard?days=30` | `get_dashboard` |
+| `GET /api/submissions/{id}` | `idp_get_submission` |
+| `POST /api/chat/stream` | the chatbot's tools (`run_aggregate`, `build_chart`, `idp_*`, ...) - server-sent events |
 
-**How chat answers stay grounded.** The model answers by calling the read-only tools. Charts come from a `create_chart` tool
-that takes an aggregation pipeline: the API runs it through `query_guard` and builds the
-chart from the returned rows, so every number in a chart comes from a query that ran. Each
-answer also lists the queries it used (`steps`), and the UI shows them.
+**How chat answers stay grounded.** Charts come only from `build_chart`, which runs the aggregation and
+builds the chart from its rows. Before an answer is shown it is checked: its figures must appear in the tool
+results and come with charts (a single number needs breakdowns), "none found" must not rest on empty results,
+and ids must exist (`find_id`). An answer that fails is sent back to the model (at most twice); figures that
+still can't be verified are flagged in the answer.

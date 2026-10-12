@@ -55,3 +55,33 @@ def test_unknown_source_rejected():
 def test_idp_tools_registered():
     tools = {t.name for t in mcp_server.mcp._tool_manager.list_tools()}
     assert {"idp_find_submissions", "idp_get_submission", "idp_get_run_details"} <= tools
+
+
+class _Coll:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def find_one(self, flt, projection=None):
+        return next((d for d in self.docs if all(d.get(k) == v for k, v in flt.items())), None)
+
+
+class _Db(dict):
+    def __getitem__(self, name):
+        return self.get(name) or _Coll([])
+
+    __getattr__ = __getitem__
+
+
+def test_file_whose_submission_was_deleted_still_resolves():
+    from bson import ObjectId
+    file_id, email_id = ObjectId(), ObjectId()
+    db = _Db(files=_Coll([{"_id": file_id, "source_email_id": email_id}]))
+    source, sub, note = IdpFlow(db)._resolve(file_id)
+    assert source == "email" and sub == {"_id": email_id}
+    assert "no longer exists" in note
+
+
+def test_unknown_id_is_still_not_found():
+    from bson import ObjectId
+    with pytest.raises(ValueError):
+        IdpFlow(_Db())._resolve(ObjectId())

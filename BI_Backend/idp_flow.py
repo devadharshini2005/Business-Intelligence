@@ -181,21 +181,31 @@ class IdpFlow:
             if doc:
                 return source, doc, None
         hints = [("files", "file"), ("extraction_results", "run"), ("file_process_tracker", "node step")]
+        orphan: tuple[str, dict[str, Any], str] | None = None
         for coll, kind in hints:
             doc = self.db[coll].find_one({"_id": any_id})
             if not doc:
                 continue
+            if coll == "file_process_tracker" and doc.get("extraction_result_id"):
+                # A node step: go to its run.
+                return self._resolve(doc["extraction_result_id"])
             for source, cfg in SOURCES.items():
                 key = cfg["file_fk"] if coll == "files" else cfg["run_fk"]
                 if doc.get(key):
                     sub = self.db[cfg["collection"]].find_one({"_id": doc[key]}, cfg["header"])
                     if sub:
                         return source, sub, f"resolved from {kind} {any_id}"
+                    # The submission record was deleted but its files / runs remain.
+                    orphan = orphan or (source, {"_id": doc[key]},
+                                        f"resolved from {kind} {any_id}. The {source} record {doc[key]} no longer "
+                                        f"exists in {cfg['collection']} (deleted), so only its files and runs are shown.")
             if coll == "files" and _get(doc, "metadata.parent_file_id"):
                 try:
                     return self._resolve(_oid(_get(doc, "metadata.parent_file_id")))
                 except ValueError:
                     pass
+            if orphan:
+                return orphan
         raise ValueError(f"no submission, file or run found with id {any_id}")
 
     def _node_rows(self, run_ids: list[ObjectId]) -> list[dict[str, Any]]:

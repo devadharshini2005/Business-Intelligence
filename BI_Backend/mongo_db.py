@@ -184,11 +184,14 @@ class MongoMetadataClient:
 
     def list_collections(self, database: str | None = None) -> list[dict[str, Any]]:
         rows = []
-        for c in self._db(database).list_collections():
+        db = self._db(database)
+        for c in db.list_collections():
             options = c.get("options", {})
+            is_coll = c.get("type", "collection") == "collection"
             rows.append({
                 "collection": c["name"],
                 "type": c.get("type", "collection"),
+                "approx_documents": db[c["name"]].estimated_document_count() if is_coll else None,
                 "view_on": options.get("viewOn"),
                 "capped": options.get("capped", False),
                 "has_validator": "validator" in options,
@@ -362,6 +365,16 @@ class MongoMetadataClient:
         flt = parse_filter(filter_json)
         return {"collection": collection, "filter": _to_json(flt),
                 "document_count": self._coll(collection, database).count_documents(flt)}
+
+    def find_id(self, any_id: str, database: str | None = None) -> list[dict[str, Any]]:
+        """Collections holding a document whose _id is this id (as ObjectId or as string)."""
+        keys: list[Any] = [any_id]
+        if ObjectId.is_valid(any_id):
+            keys.insert(0, ObjectId(any_id))
+        db = self._db(database)
+        return [{"collection": name, "_id": str(k)}
+                for name in sorted(db.list_collection_names()) for k in keys
+                if db[name].find_one({"_id": k}, {"_id": 1})]
 
     def get_distinct_values(
         self, collection: str, field_path: str, database: str | None = None, limit: int = 100

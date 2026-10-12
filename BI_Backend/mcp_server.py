@@ -9,6 +9,7 @@ Run:  python mcp_server.py
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -23,6 +24,8 @@ load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
+from charts import as_percent, from_rows, split_mixed_scales  # noqa: E402
+from dashboard import Dashboard  # noqa: E402
 from idp_flow import IdpFlow  # noqa: E402
 from mongo_db import MongoMetadataClient  # noqa: E402
 from query_guard import QueryGuardError  # noqa: E402
@@ -49,6 +52,14 @@ def _db() -> MongoMetadataClient:
 
 def _idp() -> IdpFlow:
     return IdpFlow(_db().database())
+
+
+def _j(value: Any) -> str:
+    """Filters, projections, sorts and pipelines may arrive as JSON text or as JSON objects/arrays."""
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+Json = str | dict[str, Any] | list[dict[str, Any]]
 
 
 def _envelope(rows: Any) -> dict[str, Any]:
@@ -218,11 +229,11 @@ async def get_inferred_relationships(collection: str = "", database: str = "", v
 
 # --- read-only data access -----------------------------------------------------
 @mcp.tool()
-async def count_documents(collection: str, filter: str = "", database: str = "") -> dict[str, Any]:
+async def count_documents(collection: str, filter: Json = "", database: str = "") -> dict[str, Any]:
     """Number of documents in a collection, optionally matching a JSON filter
     (e.g. '{"status": "open"}')."""
     try:
-        return _db().count_documents(collection, database or None, filter)
+        return _db().count_documents(collection, database or None, _j(filter))
     except Exception as ex:
         return _err(ex)
 
@@ -239,24 +250,24 @@ async def get_distinct_values(collection: str, field_path: str, database: str = 
 
 @mcp.tool()
 async def run_find(
-    collection: str, filter: str = "", projection: str = "", sort: str = "", database: str = "", max_rows: int = 100
+    collection: str, filter: Json = "", projection: Json = "", sort: Json = "", database: str = "", max_rows: int = 100
 ) -> dict[str, Any]:
     """Read documents with one find() (the SELECT of MongoDB). Arguments are
     JSON strings, e.g. filter='{"status": "open"}', projection='{"name": 1, "_id": 0}',
     sort='{"created_at": -1}'. Leave filter empty to read all documents (up to max_rows)."""
     try:
-        return _envelope(_db().run_find(collection, filter, projection, sort, database or None, max_rows))
+        return _envelope(_db().run_find(collection, _j(filter), _j(projection), _j(sort), database or None, max_rows))
     except Exception as ex:
         return _err(ex)
 
 
 @mcp.tool()
-async def run_aggregate(collection: str, pipeline: str, database: str = "", max_rows: int = 100) -> dict[str, Any]:
+async def run_aggregate(collection: str, pipeline: Json, database: str = "", max_rows: int = 100) -> dict[str, Any]:
     """Run one read-only aggregation pipeline given as a JSON array, e.g.
     '[{"$match": {"status": "open"}}, {"$group": {"_id": "$type", "n": {"$sum": 1}}}]'.
     Rejected if it contains $out, $merge or server-side JavaScript."""
     try:
-        return _envelope(_db().run_aggregate(collection, pipeline, database or None, max_rows))
+        return _envelope(_db().run_aggregate(collection, _j(pipeline), database or None, max_rows))
     except Exception as ex:
         return _err(ex)
 
@@ -302,6 +313,48 @@ async def idp_get_run_details(
     include_node_outputs adds each node's full execution context."""
     try:
         return _idp().get_run_details(run_id, include_extracted_data, include_node_outputs)
+    except Exception as ex:
+        return _err(ex)
+
+
+# --- analytics -------------------------------------------------------------------
+@mcp.tool()
+async def find_id(id: str, database: str = "") -> dict[str, Any]:
+    """Which collection(s) hold a document with this _id - use it when you don't know what an id is."""
+    try:
+        return _envelope(_db().find_id(id, database or None))
+    except Exception as ex:
+        return _err(ex)
+
+
+@mcp.tool()
+async def build_chart(
+    title: str, chart_type: str, collection: str, pipeline: Json, x_field: str, y_fields: list[str],
+    series_names: list[str] | None = None, unit: str = "", series_field: str = "", missing_value: str = "zero",
+    database: str = "",
+) -> dict[str, Any]:
+    """Chart spec(s) built from one read-only aggregation, so every number in the chart comes from the data.
+    chart_type: bar | hbar | line | pie | doughnut | kpi | table. Each output row is one point: x_field is the
+    label (category or date string), y_fields the values (one series each). For one line/bar per category, return
+    long rows (e.g. {day, source, n}) and pass series_field="source". Days missing from a daily axis count as 0
+    (missing_value="gap" for averages/rates). For kpi, the first row's y_fields[0] is the value."""
+    try:
+        rows = _db().run_aggregate(collection, _j(pipeline), database or None, 1000)
+        if not rows:
+            return {"charts": [], "row_count": 0, "note": "No rows - check field names, filters and date types."}
+        spec = from_rows(title, chart_type, rows, x_field, y_fields, series_names, unit, series_field, missing_value)
+        specs = [spec] if series_field else split_mixed_scales(spec)  # different measures get their own chart
+        return {"charts": [as_percent(s) for s in specs], "row_count": len(rows), "rows": rows[:50]}
+    except Exception as ex:
+        return _err(ex)
+
+
+@mcp.tool()
+async def get_dashboard(days: int = 30) -> dict[str, Any]:
+    """The IDP analytics dashboard for the last N days (0 = all time): KPI tiles and chart specs
+    (submissions per day by source, by source, runs by status, top processes, file types, latest submissions)."""
+    try:
+        return Dashboard(_db().database()).build(days)
     except Exception as ex:
         return _err(ex)
 
