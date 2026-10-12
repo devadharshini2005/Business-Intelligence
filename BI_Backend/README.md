@@ -22,9 +22,10 @@ questions from the database with text plus charts – see [BI API](#bi-api-for-t
 | `idp_flow.py` | Actuvara IDP-specific tools: submission → files → runs → workflow nodes |
 | `query_guard.py` | Parses JSON filters/pipelines and rejects write stages and server-side JavaScript |
 | `mcp_server.py` | The MCP server: exposes the tools to Copilot over stdio |
-| `api_server.py` | BI HTTP API (FastAPI) for the Angular frontend: `/api/dashboard`, `/api/chat`, `/api/health` |
+| `api_server.py` | BI HTTP API (FastAPI) for the Angular frontend: `/api/*` endpoints, and it serves the built frontend at `/` |
+| `bi_analytics.py` | Fixed read-only aggregations behind the Angular dashboard pages (overview, trend, processes, node hotspots, collections) |
 | `dashboard.py` | Fixed read-only aggregations behind the dashboard (KPIs, trends, breakdowns) |
-| `chat_agent.py` | Chatbot: Claude + the read-only tools + `create_chart` |
+| `chat_agent.py` | Chatbot: Azure OpenAI (GPT) or Claude + the read-only tools + `create_chart` |
 | `charts.py` | Turns aggregation rows into chart specs (shared by dashboard and chatbot) |
 | `.vscode/mcp.json` | Registers the server with Copilot in VS Code |
 | `.mcp.json` | Registers the same server with Claude Code |
@@ -124,11 +125,15 @@ Example questions: *"Show the latest webhook submissions"*, *"What happened to s
 
 ## BI API (for the Angular frontend)
 
-`api_server.py` serves the dashboard and the chatbot to `../BI_Frontend`. It uses the same
-read-only `MongoMetadataClient` / `IdpFlow` code as the MCP server.
+`api_server.py` serves the dashboard and chatbot to `../BI_Frontend`; dashboard API endpoints use
+the read-only `MongoMetadataClient` / `IdpFlow` implementation.
+
+For each chat request, GPT is given the tools advertised by `mcp_server.py`; tool calls are sent
+to a child MCP server over stdio, so database reads use the same guarded MCP tools as the editor
+integration. The chatbot's `create_chart` helper gets its rows through the MCP `run_aggregate` tool.
 
 1. In `.env` (see `.env.example`), next to `MONGODB_URI`, set the chatbot's model access - one of:
-   - **Azure OpenAI** (e.g. GPT-4.1 in Azure AI Foundry): `AZURE_OPENAI_API_KEY`,
+   - **Azure OpenAI** (e.g. GPT-4.1 or GPT-5 in Azure AI Foundry): `AZURE_OPENAI_API_KEY`,
      `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`
    - **Claude on Foundry**: `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_RESOURCE`,
      `CHAT_MODEL=<Claude deployment name>`
@@ -137,14 +142,26 @@ read-only `MongoMetadataClient` / `IdpFlow` code as the MCP server.
 3. Run it:
 
    ```powershell
-   uvicorn api_server:app --reload --port 8000
+   uvicorn api_server:app --reload --port 8000      # or: python api_server.py
    ```
+
+   Build the frontend once (`cd ..\BI_Frontend; npm install; npm run build`) and the same server
+   serves the dashboard at http://127.0.0.1:8000/. For frontend development use `npm start` in
+   `BI_Frontend` instead (http://localhost:4200, `/api` is proxied to port 8000).
 
 | Endpoint | Returns |
 |---|---|
 | `GET /api/health` | Database reachable? Chatbot key set? |
 | `GET /api/dashboard?days=30` | KPI tiles + charts (`days=0` = all time) |
 | `POST /api/chat` | `{"messages": [{"role": "user", "content": "..."}]}` → `{"answer", "charts", "steps"}` |
+| `GET /api/overview?days=30` | KPIs for the period and the previous period, run status counts, file funnel |
+| `GET /api/trend?days=30` | Submissions per day by source, runs per day |
+| `GET /api/processes?days=30` | Runs per process: completed / failed / other, success rate, avg time |
+| `GET /api/node-hotspots?days=30` | Workflow nodes most often failed / rejected / awaiting approval |
+| `GET /api/collections` | Every collection with its estimated document count |
+| `GET /api/submissions?source=&status=&search=&days=&limit=` | Same as `idp_find_submissions` |
+| `GET /api/submissions/{id}`, `GET /api/runs/{id}` | Same as `idp_get_submission` / `idp_get_run_details` |
+| `/` | The built Angular app (`BI_FRONTEND_DIST` overrides where it's read from) |
 
 **How chat answers stay grounded.** The model answers by calling the read-only tools. Charts come from a `create_chart` tool
 that takes an aggregation pipeline: the API runs it through `query_guard` and builds the

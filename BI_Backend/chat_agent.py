@@ -17,18 +17,22 @@ optional for Claude: CHAT_EFFORT.
 """
 from __future__ import annotations
 
+import asyncio
+import datetime as dt
 import json
 import os
 import sys
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import anthropic
 import openai
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from bi_analytics import metric_rows
 from charts import CHART_TYPES, from_rows
-from idp_flow import IdpFlow
-from mongo_db import MongoMetadataClient
 
 MODEL = os.getenv("CHAT_MODEL", "claude-opus-5-5")
 EFFORT = os.getenv("CHAT_EFFORT", "medium")
@@ -61,16 +65,114 @@ For questions about a specific submission, file or run use the idp_* tools. For 
 use run_aggregate. If you are unsure of a field name or its type, check with infer_collection_schema or
 get_distinct_values before building a pipeline - do not assume. Dates are BSON dates unless a schema says otherwise.
 
-Charts: whenever the answer contains numbers that compare, rank, break down or trend (counts by status, per day,
-per process, top N, shares), call create_chart with an aggregation pipeline that produces exactly those numbers -
+Charts: for the common analytics - runs by status, runs by process, submissions by source, failing workflow nodes,
+submissions or runs per day - ALWAYS use chart_metric: its numbers come from the dashboard's tested queries and are
+labelled with real names. Use create_chart only for anything else.
+Whenever the answer contains numbers that compare, rank, break down or trend (counts by status, per day,
+per process, top N, shares), call chart_metric or create_chart with data that produces exactly those numbers -
 usually 1 chart, at most 3, each showing something different. Pick the chart type by the data's job: line for change
 over time (sort by date ascending), bar for comparing categories, hbar for ranked lists or long labels, doughnut for
 parts of a whole with at most 6 parts, kpi for one headline number, table for row-level detail (ids, names, dates).
 Do not chart a single yes/no or a single record. Charts appear below your text automatically.
+If the user asks for a specific chart type ("pie chart", "bar chart", "line chart"), use exactly that type (pie for
+"pie", bar for "bar" or "column", hbar for "horizontal bar"), and if they ask for more than one chart, make each one.
+The app colours each category of a pie or single-series bar chart differently, so one series is enough.
+Label charts and answers with names, never raw ids when a name exists. For processes, after grouping by
+"$proccess_id" add {"$lookup": {"from": "processes", "localField": "_id", "foreignField": "_id", "as": "p"}},
+{"$project": {"_id": 0, "name": {"$ifNull": [{"$first": "$p.name"}, {"$toString": "$_id"}]}, "n": 1}} and chart x_field
+"name". Likewise use emails.subject / webhooks.reference_subject / files.filename instead of ids where it helps.
+Only mention a chart in your answer if a chart tool returned "charted": true; if one failed or found no data, say so.
+
+Every number, name or id in an answer must come from a tool you called while answering THIS question - earlier
+answers in the conversation may be wrong, so look again. Never say a value came from a tool you did not call.
+
+Counting: never count items in a list yourself - you will miscount long lists. Take every number from a field
+the tools return: row_count (list results), document_count, collection_count, or a $count / $group / $sum query you
+run. "How many collections" = row_count of list_collections; "how many X" = count_documents or an aggregation.
+
+Corrections: if the user says a number is wrong, re-check it with a tool before replying - do not simply agree.
+If your earlier answer was wrong, say so plainly ("I miscounted - the correct number is 60") and give the checked
+value. Never invent a reason for an error (e.g. "the database changed" or "the data was out of date") unless a tool
+result shows it.
 
 Answer format: start with the direct answer in one or two sentences, then any short supporting detail in Markdown.
 Do not repeat every number a chart shows - mention the key ones. Keep ids exactly as returned.
 """
+
+
+STALE_DATE_DAYS = 400  # a $date further back than this is flagged to the model
+
+
+def _iso(t: dt.datetime) -> str:
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def date_context(now: dt.datetime | None = None) -> str:
+    """Today's date and ready-made window starts. The model has no clock: without this it
+    computes "last 30 days" from its training-era sense of the date and filters on the wrong year."""
+    now = (now or dt.datetime.now(dt.timezone.utc)).astimezone(dt.timezone.utc).replace(microsecond=0)
+    midnight = now.replace(hour=0, minute=0, second=0)
+    windows = [
+        ("last 24 hours", now - dt.timedelta(hours=24)),
+        ("today", midnight),
+        ("last 7 days", now - dt.timedelta(days=7)),
+        ("last 30 days", now - dt.timedelta(days=30)),
+        ("last 90 days", now - dt.timedelta(days=90)),
+        ("this month", midnight.replace(day=1)),
+        ("this year", midnight.replace(month=1, day=1)),
+    ]
+    lines = "\n".join(f'  {name}: {{"$gte": {{"$date": "{_iso(start)}"}}}}' for name, start in windows)
+    return (f"CURRENT DATE: today is {now:%A %d %B %Y}; the time now is {_iso(now)} (UTC). Your own sense of the "
+            "date is out of date - always compute relative periods (\"last 30 days\", \"this week\", \"yesterday\") "
+            "from this date, never from memory. Ready-made $match bounds for date fields:\n"
+            f"{lines}\n"
+            "Use these exact values (or compute from today the same way), and say the date range you used in the "
+            "answer, e.g. 'from 12 Sep 2026 to 12 Oct 2026'. For idp_find_submissions pass `days` instead.")
+
+
+def _dates_in(value: Any) -> list[dt.datetime]:
+    """Every {"$date": ...} literal inside a JSON string / dict / list from a tool call."""
+    if isinstance(value, str):
+        if '"$date"' not in value:
+            return []
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    found: list[dt.datetime] = []
+    if isinstance(value, dict):
+        raw = value.get("$date")
+        if isinstance(raw, str):
+            try:
+                found.append(dt.datetime.fromisoformat(raw.replace("Z", "+00:00")))
+            except ValueError:
+                pass
+        elif isinstance(raw, (int, float)):
+            found.append(dt.datetime.fromtimestamp(raw / 1000, dt.timezone.utc))
+        for child in value.values():
+            found += _dates_in(child)
+    elif isinstance(value, list):
+        for child in value:
+            found += _dates_in(child)
+    return found
+
+
+def date_warning(args: dict[str, Any], now: dt.datetime | None = None) -> str | None:
+    """A note for the model when a query filters on a date in the future or far in the past -
+    the usual sign it guessed today's date instead of using the one it was given."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    odd = []
+    for d in _dates_in([args.get(k) for k in ("pipeline", "filter")]):
+        d = d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)
+        if d > now + dt.timedelta(days=1):
+            odd.append(f"{_iso(d)} is in the future")
+        elif d < now - dt.timedelta(days=STALE_DATE_DAYS):
+            odd.append(f"{_iso(d)} is {(now - d).days} days before today")
+    if not odd:
+        return None
+    return (f"Check the date filter: {'; '.join(odd)} (today is {_iso(now.replace(microsecond=0))}). If the question "
+            "is about a recent period, recompute the bound from today's date and run the query again; if the date is "
+            "intended, carry on.")
 
 
 def _log(msg: str) -> None:
@@ -82,44 +184,8 @@ def _schema(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
 
 
 S = {"type": "string"}
-I = {"type": "integer"}
-B = {"type": "boolean"}
 
 TOOLS: list[dict[str, Any]] = [
-    {"name": "list_collections", "description": "List collections (MongoDB's tables) with their approximate document counts.",
-     "input_schema": _schema({}, [])},
-    {"name": "infer_collection_schema",
-     "description": "Field paths and types found in a sample of a collection's documents, with how often each appears.",
-     "input_schema": _schema({"collection": S, "sample_size": I}, ["collection"])},
-    {"name": "get_distinct_values",
-     "description": "Distinct values of one field with document counts - use for status/type/category fields.",
-     "input_schema": _schema({"collection": S, "field_path": S, "limit": I}, ["collection", "field_path"])},
-    {"name": "count_documents",
-     "description": 'Number of documents in a collection, optionally matching a JSON filter string, e.g. \'{"status": "failed"}\'.',
-     "input_schema": _schema({"collection": S, "filter": S}, ["collection"])},
-    {"name": "run_find",
-     "description": "Read documents with one find(). filter, projection and sort are JSON strings "
-                    '(MongoDB Extended JSON accepted, e.g. {"_id": {"$oid": "..."}}). Always project only the fields you need.',
-     "input_schema": _schema({"collection": S, "filter": S, "projection": S, "sort": S, "max_rows": I}, ["collection"])},
-    {"name": "run_aggregate",
-     "description": "Run one read-only aggregation pipeline given as a JSON array string. $out, $merge and "
-                    "server-side JavaScript are rejected. Dates in $match: {\"$date\": \"2026-01-01T00:00:00Z\"}.",
-     "input_schema": _schema({"collection": S, "pipeline": S, "max_rows": I}, ["collection", "pipeline"])},
-    {"name": "get_inferred_relationships",
-     "description": "Likely links between collections, inferred from '<name>_id' fields and checked on a sample.",
-     "input_schema": _schema({"collection": S}, [])},
-    {"name": "idp_find_submissions",
-     "description": "List IDP submissions newest first across email, webhook and manual uploads, with file and run counts. "
-                    "source: email | webhook | manual_upload (empty = all); status: the submission's status; "
-                    "search: text in subject/sender/claim or policy number; days: last N days (0 = any).",
-     "input_schema": _schema({"source": S, "status": S, "search": S, "days": I, "limit": I}, [])},
-    {"name": "idp_get_submission",
-     "description": "One submission (or the submission of a file id / run id): details, files, and per file its runs with "
-                    "node progress, current step and failed / awaiting-approval nodes.",
-     "input_schema": _schema({"submission_id": S, "include_nodes": B}, ["submission_id"])},
-    {"name": "idp_get_run_details",
-     "description": "One run (extraction_results id): every workflow node in order with status, timing, errors and approvals.",
-     "input_schema": _schema({"run_id": S, "include_extracted_data": B}, ["run_id"])},
     {"name": "create_chart",
      "description": "Attach a chart to your answer. The pipeline runs on `collection` and each output row becomes one "
                     "point: x_field gives the label (category or date string), y_fields the numeric values (one series "
@@ -161,14 +227,12 @@ def _make_client() -> tuple[Any, dict[str, Any]]:
     return anthropic.Anthropic(), {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
 
 
-# Same tools in the OpenAI function-calling shape.
 OPENAI_TOOLS = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                   "parameters": t["input_schema"]}} for t in TOOLS]
 
 
 class ChatAgent:
-    def __init__(self, mongo: MongoMetadataClient) -> None:
-        self.mongo = mongo
+    def __init__(self) -> None:
         self.client, self.fallback_args = _make_client()
         if USE_AZURE_OPENAI:
             _log(f"deployment {AZURE_DEPLOYMENT} via Azure OpenAI")
@@ -176,90 +240,158 @@ class ChatAgent:
             _log(f"model {MODEL} via {'Microsoft Foundry' if USE_FOUNDRY else 'Claude API'}"
                  + (f", fallback {FALLBACK_MODEL}" if USE_FOUNDRY and FALLBACK_MODEL else ""))
 
-    # --- tools -----------------------------------------------------------------
-    def _handlers(self, charts: list[dict[str, Any]]) -> dict[str, Callable[..., Any]]:
-        m = self.mongo
-        idp = IdpFlow(m.database())
-
-        def list_collections() -> Any:
-            db = m.database()
-            return [{"collection": c["collection"], "type": c["type"],
-                     "approx_documents": db[c["collection"]].estimated_document_count()
-                     if c["type"] == "collection" else None} for c in m.list_collections()]
-
-        def create_chart(title: str, chart_type: str, collection: str, pipeline: str, x_field: str,
-                         y_fields: list[str], series_names: list[str] | None = None, unit: str = "") -> Any:
-            if len(charts) >= MAX_CHARTS:
-                return {"error": f"at most {MAX_CHARTS} charts per answer"}
-            rows = m.run_aggregate(collection, pipeline, None, 200)
-            if not rows:
-                return {"charted": False, "note": "The pipeline returned no rows, so no chart was added."}
-            charts.append(from_rows(title, chart_type, rows, x_field, y_fields, series_names, unit))
-            return {"charted": True, "row_count": len(rows), "rows": rows[:50]}
-
-        return {
-            "list_collections": list_collections,
-            "infer_collection_schema": lambda collection, sample_size=100:
-                m.infer_collection_schema(collection, None, sample_size),
-            "get_distinct_values": lambda collection, field_path, limit=50:
-                m.get_distinct_values(collection, field_path, None, limit),
-            "count_documents": lambda collection, filter="": m.count_documents(collection, None, filter),
-            "run_find": lambda collection, filter="", projection="", sort="", max_rows=50:
-                m.run_find(collection, filter, projection, sort, None, max_rows),
-            "run_aggregate": lambda collection, pipeline, max_rows=100:
-                m.run_aggregate(collection, pipeline, None, max_rows),
-            "get_inferred_relationships": lambda collection="":
-                m.get_inferred_relationships(collection, None, verify=True),
-            "idp_find_submissions": lambda source="", status="", search="", days=0, limit=20:
-                idp.find_submissions(source, status, search, days, limit),
-            "idp_get_submission": lambda submission_id, include_nodes=False:
-                idp.get_submission(submission_id, include_nodes),
-            "idp_get_run_details": lambda run_id, include_extracted_data=False:
-                idp.get_run_details(run_id, include_extracted_data, False),
-            "create_chart": create_chart,
-        }
-
     @staticmethod
     def _result_text(value: Any) -> str:
         text = json.dumps(value, default=str, ensure_ascii=False)
         if len(text) > MAX_RESULT_CHARS:
-            text = text[:MAX_RESULT_CHARS] + f'... [truncated: {len(text)} chars total - narrow the query]'
+            text = text[:MAX_RESULT_CHARS] + (f'... [truncated: {len(text)} chars total - only part of the rows are '
+                                              'shown; row_count above is the full count. Narrow the query for details]')
         return text
 
     # --- conversation ----------------------------------------------------------
     def answer(self, history: list[dict[str, str]]) -> dict[str, Any]:
         """history: [{"role": "user" | "assistant", "content": str}, ...] ending with the user's question.
         Returns {"answer": markdown, "charts": [spec], "steps": [{"tool", "input", "ok"}]}."""
+        return asyncio.run(self._answer_with_mcp(history))
+
+    async def _answer_with_mcp(self, history: list[dict[str, str]]) -> dict[str, Any]:
         messages: list[dict[str, Any]] = [{"role": h["role"], "content": h["content"]}
                                           for h in history if h.get("content")]
         charts: list[dict[str, Any]] = []
         steps: list[dict[str, Any]] = []
-        handlers = self._handlers(charts)
-        if USE_AZURE_OPENAI:
-            return self._loop_openai(messages, charts, steps, handlers)
-        # Pins this question's follow-up requests to whichever model accepted (Foundry middleware).
-        with anthropic.BetaFallbackState():
-            return self._loop(messages, charts, steps, handlers)
+        warned: set[str] = set()  # tool calls already sent back once with a date warning
+        server_path = Path(__file__).with_name("mcp_server.py")
+        params = StdioServerParameters(command=sys.executable, args=[str(server_path)],
+                                       cwd=str(server_path.parent))
+        async with stdio_client(params) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                mcp_tools = (await session.list_tools()).tools
+                if USE_AZURE_OPENAI:
+                    return await self._loop_openai(messages, charts, steps, warned, session, mcp_tools)
+                # Pins this question's follow-up requests to whichever model accepted (Foundry middleware).
+                with anthropic.BetaFallbackState():
+                    return await self._loop(messages, charts, steps, warned, session, mcp_tools)
 
-    def _run_tool(self, name: str, args: dict[str, Any], handlers: dict[str, Callable[..., Any]],
-                  steps: list[dict[str, Any]]) -> tuple[str, bool]:
-        fn = handlers.get(name)
+    @staticmethod
+    def _mcp_value(result: Any) -> Any:
+        structured = getattr(result, "structuredContent", None)
+        if structured is not None:
+            return structured
+        texts = [item.text for item in result.content if getattr(item, "type", None) == "text"]
+        if len(texts) == 1:
+            try:
+                return json.loads(texts[0])
+            except json.JSONDecodeError:
+                return texts[0]
+        return texts
+
+    async def _call_tool(self, name: str, args: dict[str, Any], charts: list[dict[str, Any]],
+                         steps: list[dict[str, Any]], warned: set[str], session: ClientSession,
+                         mcp_tool_names: set[str]) -> tuple[str, bool]:
+        warning = date_warning(args)
+        key = name + json.dumps(args, sort_keys=True, default=str)
+        if warning and name == "create_chart" and key not in warned:
+            warned.add(key)
+            _log(f"date warning, chart held back: {warning}")
+            result: Any = {"charted": False, "date_warning": warning,
+                           "note": "Not charted yet. Fix the date and call again, or re-send this exact call "
+                                   "if the date is intended."}
+            steps.append({"tool": name, "input": args, "ok": True})
+            return self._result_text(result), False
         try:
-            if fn is None:
+            if name == "create_chart":
+                if len(charts) >= MAX_CHARTS:
+                    value: Any = {"error": f"at most {MAX_CHARTS} charts per answer"}
+                    is_error = True
+                else:
+                    result = await session.call_tool(
+                        "run_aggregate",
+                        {"collection": args["collection"], "pipeline": args["pipeline"], "max_rows": 200},
+                    )
+                    value = self._mcp_value(result)
+                    is_error = result.isError or (isinstance(value, dict) and "error" in value)
+                    if not is_error and (not isinstance(value, dict) or "rows" not in value):
+                        raise RuntimeError("MCP run_aggregate returned an unexpected result")
+                    rows = value.get("rows", []) if isinstance(value, dict) else []
+                    if not is_error and rows:
+                        charts.append(from_rows(args["title"], args["chart_type"], rows, args["x_field"],
+                                                args["y_fields"], args.get("series_names"), args.get("unit", "")))
+                        value = {"charted": True, "row_count": len(rows), "rows": rows[:50]}
+                    elif not is_error:
+                        value = {"charted": False, "note": "The pipeline returned no rows, so no chart was added."}
+            elif name in mcp_tool_names:
+                result = await session.call_tool(name, args)
+                value = self._mcp_value(result)
+                is_error = result.isError or (isinstance(value, dict) and "error" in value)
+                if not is_error and not isinstance(value, dict):
+                    raise RuntimeError(f"MCP tool {name} returned an unexpected result")
+                if not is_error and name == "chart_metric":
+                    chart_data = value
+                    if len(charts) >= MAX_CHARTS:
+                        value = {"error": f"at most {MAX_CHARTS} charts per answer"}
+                        is_error = True
+                    elif not chart_data.get("rows") or not any(
+                        any(row.get(field) for field in chart_data["y_fields"]) for row in chart_data["rows"]
+                    ):
+                        value = {"charted": False, "note": "No data for this metric in the requested period.",
+                                 "rows": chart_data.get("rows", [])}
+                    else:
+                        charts.append(from_rows(chart_data["title"], chart_data["chart_type"], chart_data["rows"],
+                                                chart_data["x_field"], chart_data["y_fields"],
+                                                chart_data["series_names"]))
+                        value = {"charted": True, "row_count": len(chart_data["rows"]),
+                                 "rows": chart_data["rows"][:50]}
+            else:
                 raise ValueError(f"unknown tool {name}")
-            content, is_error = self._result_text(fn(**args)), False
+            if warning:
+                _log(f"date warning: {warning}")
+                value = {"date_warning": warning, "result": value}
+            content = self._result_text(value)
         except Exception as ex:
             content, is_error = f"{type(ex).__name__}: {ex}", True
             _log(f"{name} failed: {content}")
         steps.append({"tool": name, "input": args, "ok": not is_error})
         return content, is_error
 
-    def _loop_openai(self, messages: list[dict[str, Any]], charts: list[dict[str, Any]],
-                     steps: list[dict[str, Any]], handlers: dict[str, Callable[..., Any]]) -> dict[str, Any]:
-        msgs: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}, *messages]
-        for _ in range(MAX_TURNS):
-            response = self.client.chat.completions.create(
-                model=AZURE_DEPLOYMENT, messages=msgs, tools=OPENAI_TOOLS, temperature=0, max_tokens=8000)
+    @staticmethod
+    def _openai_tool_specs(mcp_tools: list[Any]) -> list[dict[str, Any]]:
+        mcp_specs = [
+            {"type": "function", "function": {
+                "name": tool.name, "description": tool.description or "",
+                "parameters": tool.inputSchema,
+            }}
+            for tool in mcp_tools
+        ]
+        return mcp_specs + OPENAI_TOOLS
+
+    @staticmethod
+    def _anthropic_tool_specs(mcp_tools: list[Any]) -> list[dict[str, Any]]:
+        return [
+            {"name": tool.name, "description": tool.description or "", "input_schema": tool.inputSchema}
+            for tool in mcp_tools
+        ] + TOOLS
+
+    async def _loop_openai(self, messages: list[dict[str, Any]], charts: list[dict[str, Any]],
+                           steps: list[dict[str, Any]], warned: set[str], session: ClientSession,
+                           mcp_tools: list[Any]) -> dict[str, Any]:
+        msgs: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT + "\n" + date_context()}, *messages]
+        mcp_tool_names = {tool.name for tool in mcp_tools}
+        tool_specs = self._openai_tool_specs(mcp_tools)
+        for turn in range(MAX_TURNS):
+            # First call of each question must use a tool: left to choose, GPT sometimes answers a data
+            # question from memory (e.g. "13 collections" with no lookup) and cites a tool it never called.
+            request_args: dict[str, Any] = {
+                "model": AZURE_DEPLOYMENT,
+                "messages": msgs,
+                "tools": tool_specs,
+                "tool_choice": "required" if turn == 0 else "auto",
+            }
+            if AZURE_DEPLOYMENT.lower().startswith("gpt-5"):
+                request_args["max_completion_tokens"] = 8000
+            else:
+                request_args.update(temperature=0, max_tokens=8000)
+            response = await asyncio.to_thread(self.client.chat.completions.create, **request_args)
             choice = response.choices[0]
             msg = choice.message
             if choice.finish_reason == "content_filter":
@@ -274,7 +406,8 @@ class ChatAgent:
             for call in msg.tool_calls:
                 try:
                     args = json.loads(call.function.arguments or "{}")
-                    content, _ = self._run_tool(call.function.name, args, handlers, steps)
+                    content, _ = await self._call_tool(call.function.name, args, charts, steps, warned,
+                                                       session, mcp_tool_names)
                 except json.JSONDecodeError as ex:
                     content = f"Invalid JSON arguments: {ex}"
                 msgs.append({"role": "tool", "tool_call_id": call.id, "content": content})
@@ -282,20 +415,15 @@ class ChatAgent:
         return {"answer": "I couldn't finish within the step limit - try a more specific question.",
                 "charts": charts, "steps": steps}
 
-    def _loop(self, messages: list[dict[str, Any]], charts: list[dict[str, Any]],
-              steps: list[dict[str, Any]], handlers: dict[str, Callable[..., Any]]) -> dict[str, Any]:
+    async def _loop(self, messages: list[dict[str, Any]], charts: list[dict[str, Any]],
+                    steps: list[dict[str, Any]], warned: set[str], session: ClientSession,
+                    mcp_tools: list[Any]) -> dict[str, Any]:
+        # The stable prompt first (cached), then today's date, which changes daily.
+        system = [{"type": "text", "text": SYSTEM_PROMPT}, {"type": "text", "text": date_context()}]
+        mcp_tool_names = {tool.name for tool in mcp_tools}
+        tool_specs = self._anthropic_tool_specs(mcp_tools)
         for _ in range(MAX_TURNS):
-            with self.client.beta.messages.stream(
-                model=MODEL,
-                max_tokens=16000,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=messages,
-                output_config={"effort": EFFORT},
-                cache_control={"type": "ephemeral"},
-                **self.fallback_args,
-            ) as stream:
-                response = stream.get_final_message()
+            response = await asyncio.to_thread(self._anthropic_response, system, messages, tool_specs)
 
             if response.stop_reason == "refusal":
                 return {"answer": "I can't help with that request.", "charts": charts, "steps": steps}
@@ -311,10 +439,25 @@ class ChatAgent:
             for block in response.content:
                 if block.type != "tool_use":
                     continue
-                content, is_error = self._run_tool(block.name, dict(block.input), handlers, steps)
+                content, is_error = await self._call_tool(block.name, dict(block.input), charts, steps, warned,
+                                                          session, mcp_tool_names)
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": content,
                                 "is_error": is_error})
             messages.append({"role": "user", "content": results})
 
         return {"answer": "I couldn't finish within the step limit - try a more specific question.",
                 "charts": charts, "steps": steps}
+
+    def _anthropic_response(self, system: list[dict[str, Any]], messages: list[dict[str, Any]],
+                            tools: list[dict[str, Any]]) -> Any:
+        with self.client.beta.messages.stream(
+            model=MODEL,
+            max_tokens=16000,
+            system=system,
+            tools=tools,
+            messages=messages,
+            output_config={"effort": EFFORT},
+            cache_control={"type": "ephemeral"},
+            **self.fallback_args,
+        ) as stream:
+            return stream.get_final_message()
