@@ -1,0 +1,52 @@
+<div class="shell" [class.collapsed]="collapsed()">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">A</div>
+      <span class="label">Actuvara BI</span>
+    </div>
+
+    <nav aria-label="Main">
+      <a routerLink="/dashboard" routerLinkActive="active" title="Dashboard">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="3" width="7" height="9" rx="1.5" />
+          <rect x="14" y="3" width="7" height="5" rx="1.5" />
+          <rect x="14" y="12" width="7" height="9" rx="1.5" />
+          <rect x="3" y="16" width="7" height="5" rx="1.5" />
+        </svg>
+        <span class="label">Dashboard</span>
+      </a>
+      <a routerLink="/chat" routerLinkActive="active" title="Chatbot">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4h0A1.5 1.5 0 0 1 4 14.5z" />
+          <path d="M8 8.5h8M8 11.5h5" />
+        </svg>
+        <span class="label">Chatbot</span>
+      </a>
+    </nav>
+
+    <div class="status">
+      @if (health(); as h) {
+        <div class="dot-row" [title]="h.database_error || ''">
+          <span class="dot" [class.ok]="h.database" [class.bad]="!h.database"></span>
+          <span class="label">{{ h.database ? 'DB: ' + h.database_name : 'DB not connected' }}</span>
+        </div>
+        <div class="dot-row">
+          <span class="dot" [class.ok]="h.chat_configured" [class.bad]="!h.chat_configured"></span>
+          <span class="label">{{ h.chat_configured ? 'Chatbot ready' : 'Chatbot: no API key' }}</span>
+        </div>
+      } @else if (healthError()) {
+        <div class="dot-row"><span class="dot bad"></span><span class="label">API offline</span></div>
+      }
+    </div>
+
+    <button class="collapse" type="button" (click)="toggleSidebar()"
+            [attr.aria-label]="collapsed() ? 'Expand sidebar' : 'Collapse sidebar'"
+            [attr.aria-expanded]="!collapsed()">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
+    </button>
+  </aside>
+
+  <main>
+    <router-outlet />
+  </main>
+</div>

@@ -1,0 +1,211 @@
+/* Design tokens. Chart colors follow a CVD-validated categorical order; status colors
+   are reserved for state (good / warning / critical) and never used as a series. */
+:root {
+  color-scheme: light;
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  --page: #f6f6f3;
+  --sidebar-bg: #fcfcfb;
+  --surface-1: #ffffff;
+  --surface-2: #f0efec;
+  --hover: #efeee9;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #77756f;
+  --grid: #e7e6e0;
+  --border: rgba(11, 11, 11, 0.1);
+  --border-strong: rgba(11, 11, 11, 0.18);
+
+  --accent: #2a78d6;
+  --accent-soft: #e3eefc;
+  --on-accent: #ffffff;
+
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
+
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-critical: #d03b3b;
+  --status-critical-text: #b42323;
+}
+
+@mixin dark-tokens {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --sidebar-bg: #141413;
+  --surface-1: #1a1a19;
+  --surface-2: #262624;
+  --hover: #24241f;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #8f8d86;
+  --grid: #2c2c2a;
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.2);
+
+  --accent: #3987e5;
+  --accent-soft: #1b2c44;
+  --on-accent: #ffffff;
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+
+  --status-critical-text: #f07c7c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    @include dark-tokens;
+  }
+}
+:root[data-theme='dark'] {
+  @include dark-tokens;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 14px;
+  background: var(--page);
+  color: var(--text-primary);
+}
+
+/* Routed pages fill the main column (the chat page needs a fixed height to scroll its thread). */
+main > app-chat {
+  flex: 1;
+  min-height: 0;
+}
+
+h1 {
+  font-size: 22px;
+  margin: 0;
+  font-weight: 650;
+}
+
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+
+  .sub {
+    margin: 4px 0 0;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+  .controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+}
+
+button {
+  font: inherit;
+}
+
+button.ghost,
+button.primary {
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  &:hover:not(:disabled) {
+    background: var(--hover);
+  }
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  &.small {
+    padding: 3px 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  padding: 0 20px;
+  &:hover:not(:disabled) {
+    background: var(--accent);
+    filter: brightness(1.08);
+  }
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-1);
+
+  button {
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    padding: 8px 12px;
+    cursor: pointer;
+    & + button {
+      border-left: 1px solid var(--border);
+    }
+    &.active {
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+  }
+}
+
+.banner {
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  &.error {
+    background: color-mix(in srgb, var(--status-critical) 12%, transparent);
+    color: var(--status-critical-text);
+    border: 1px solid color-mix(in srgb, var(--status-critical) 35%, transparent);
+  }
+}
+
+.skeleton {
+  border-radius: 12px;
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--hover) 50%, var(--surface-2) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite linear;
+}
+
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
