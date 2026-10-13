@@ -61,27 +61,38 @@
               <div class="bot-avatar" aria-hidden="true"><bi-icon name="sparkles" [size]="15" /></div>
               <div class="bot-body">
                 @if (m.pending) {
-                  <div class="steps"><span class="spinner sm"></span> Querying the database…</div>
+                  <div class="steps live"><ng-container *ngTemplateOutlet="flow; context: { $implicit: m }" /></div>
                 } @else if (m.steps?.length) {
                   <details class="steps">
                     <summary>Looked up the database in {{ m.steps!.length }} step{{ m.steps!.length > 1 ? 's' : '' }}</summary>
-                    <ol>
-                      @for (s of m.steps; track s.id) {
-                        <li [class.err]="!s.ok">
-                          <bi-icon [name]="s.ok ? 'check-circle' : 'x-circle'" [size]="13" />
-                          <code>{{ s.name }}</code>
-                          <span class="muted ellipsis">{{ stepLabel(s) }}</span>
-                        </li>
-                      }
-                    </ol>
+                    <ng-container *ngTemplateOutlet="flow; context: { $implicit: m }" />
                   </details>
+                }
+                @for (c of m.charts ?? []; track $index) {
+                  @if (c.type === 'stats') {
+                    <div class="stat-cards">
+                      @for (k of c.cards ?? []; track $index; let i = $index) {
+                        <div class="stat-card">
+                          <span class="stat-label"><i class="stat-dot k-{{ (i % 8) + 1 }}"></i>{{ k.label }}</span>
+                          <span class="stat-value">{{ full(k.value) }}@if (k.unit) {<small>{{ k.unit }}</small>}</span>
+                          @if (k.detail) { <span class="stat-detail">{{ k.detail }}</span> }
+                        </div>
+                      }
+                    </div>
+                  }
                 }
                 @if (m.text) {
                   <div class="md" [class.md-error]="m.error" [innerHTML]="m.text | markdown"></div>
-                } @else if (m.pending) {
-                  <div class="typing"><span></span><span></span><span></span></div>
                 }
-                @for (c of m.charts ?? []; track $index) { <bi-chat-chart [spec]="c" /> }
+                @for (c of m.charts ?? []; track $index) { @if (c.type !== 'stats') { <bi-chat-chart [spec]="c" /> } }
+                @if (!m.pending && !m.error && (m.text || m.charts?.length)) {
+                  <div class="msg-actions">
+                    <button type="button" class="msg-action" (click)="downloadPdf($event)"
+                            title="Save this answer, with its charts and tables, as a PDF report">
+                      <bi-icon name="download" [size]="14" /> Download PDF
+                    </button>
+                  </div>
+                }
               </div>
             </div>
           }
@@ -99,6 +110,40 @@
     }
   </section>
 </div>
+
+<!-- Timeline: one dot per stage (connecting, reading the question, ...) and per tool call, in order.
+     Finished dots are green (red if a tool failed); the current one pulses. -->
+<ng-template #flow let-m>
+  <ol class="flow">
+    @for (f of flowOf(m); track $index) {
+      @if (f.kind === 'status') {
+        <li class="flow-step stage" [class.running]="!f.done" [class.ok]="f.done">
+          <span class="flow-dot" aria-hidden="true"></span>
+          <div class="flow-body"><div class="flow-title">{{ f.text }}{{ f.done ? '' : '…' }}</div></div>
+        </li>
+      } @else {
+        @if (m.steps?.[f.step]; as s) {
+          <li class="flow-step" [class.running]="!s.done" [class.ok]="s.done && s.ok" [class.err]="s.done && !s.ok">
+            <span class="flow-dot" aria-hidden="true"></span>
+            <div class="flow-body">
+              <div class="flow-title"><b>{{ toolLabel(s.name) }}</b> <code>{{ s.name }}</code></div>
+              @if (stepLabel(s); as args) { <div class="flow-args muted" [title]="args">{{ args }}</div> }
+              @if (!s.done) { <div class="flow-note muted">Running…</div> }
+              @else if (s.summary) { <div class="flow-note" [class.flow-note-err]="!s.ok">{{ s.summary }}</div> }
+            </div>
+          </li>
+        }
+      }
+    } @empty {
+      @if (m.pending) {
+        <li class="flow-step stage running">
+          <span class="flow-dot" aria-hidden="true"></span>
+          <div class="flow-body"><div class="flow-title">Starting…</div></div>
+        </li>
+      }
+    }
+  </ol>
+</ng-template>
 
 <ng-template #composer>
   <div class="composer">

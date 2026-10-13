@@ -148,7 +148,7 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
 .btn .count { background: var(--accent); color: #fff; border-radius: 6px; font-size: 11px; padding: 0 6px; }
 .btn-group { display: inline-flex; }
 .btn-group > .btn, .btn-group > .menu-anchor > .btn { border-radius: 0; }
-.btn-group > :first-child { border-radius: 10px 0 0 10px; }
+.btn-group > :first-child, .btn-group > :first-child > .btn { border-radius: 10px 0 0 10px; }
 .btn-group > :last-child, .btn-group > :last-child > .btn { border-radius: 0 10px 10px 0; margin-left: -1px; }
 .menu-anchor { position: relative; }
 .menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; min-width: 200px; padding: 6px; border-radius: 12px; background: var(--surface); border: 1px solid var(--hair); box-shadow: 0 12px 32px rgba(17, 17, 24, 0.12); }
@@ -156,6 +156,14 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
 .menu-title { font-size: 11.5px; color: var(--muted); padding: 6px 10px 4px; text-transform: uppercase; letter-spacing: 0.05em; }
 .menu button { width: 100%; display: flex; align-items: center; gap: 6px; border: 0; background: none; padding: 8px 10px; border-radius: 8px; text-align: left; color: var(--ink); }
 .menu button:hover { background: var(--surface-2); }
+.date-menu { min-width: 260px; padding: 6px 10px 10px; }
+.date-fields { display: grid; gap: 8px; padding: 4px 0 10px; }
+.date-fields label { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
+.date-fields input { font: inherit; font-size: 14px; color: var(--ink); background: var(--surface); padding: 7px 9px; border-radius: 8px; border: 1px solid var(--hair-2); color-scheme: light dark; }
+.date-fields input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.date-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.menu .date-foot .primary-btn { width: auto; padding: 7px 14px; background: var(--accent); color: #fff; }
+.menu .date-foot .primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .menu .check { width: 18px; display: inline-flex; color: var(--accent); }
 
 /* ---------- cards & grid ---------- */
@@ -281,7 +289,8 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
 .hotspot:hover { border-color: var(--hair-2); background: var(--surface-2); }
 .hotspot-top { display: flex; justify-content: space-between; gap: 10px; }
 .hotspot-meta { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; }
-.node-err { display: block; font-size: 12px; color: var(--critical-ink); background: var(--critical-bg); padding: 5px 8px; border-radius: 8px; white-space: normal; }
+/* Long URLs / ids have no spaces: break them anywhere, show 3 lines, full text on hover. */
+.node-err { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; min-width: 0; font-size: 12px; color: var(--critical-ink); background: var(--critical-bg); padding: 5px 8px; border-radius: 8px; white-space: normal; overflow-wrap: anywhere; }
 
 /* ---------- tables ---------- */
 .table-wrap { overflow-x: auto; }
@@ -375,6 +384,17 @@ td.ellipsis { max-width: 220px; }
 .msg-user { display: flex; justify-content: flex-end; }
 .msg-user .bubble { max-width: 75%; padding: 11px 15px; border-radius: 16px 16px 4px 16px; background: linear-gradient(135deg, var(--accent-2), var(--accent)); color: #fff; white-space: pre-wrap; }
 .msg-bot { display: flex; gap: 12px; }
+/* Headline numbers from show_stat_cards, above the answer text. */
+.stat-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 2px 0 14px; }
+.stat-card { display: grid; gap: 4px; align-content: start; padding: 12px 14px; border: 1px solid var(--hair); border-radius: 12px; background: var(--surface); min-width: 0; break-inside: avoid; }
+.stat-label { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); min-width: 0; }
+.stat-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+.stat-value { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; color: var(--ink); font-variant-numeric: tabular-nums; }
+.stat-value small { font-size: 15px; font-weight: 500; margin-left: 2px; color: var(--ink-2); }
+.stat-detail { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.msg-actions { display: flex; gap: 6px; margin-top: 10px; }
+.msg-action { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); background: var(--surface); border: 1px solid var(--hair-2); border-radius: 8px; padding: 5px 10px; cursor: pointer; }
+.msg-action:hover { color: var(--accent); border-color: var(--accent); }
 .bot-avatar { width: 30px; height: 30px; border-radius: 50%; flex: none; display: grid; place-items: center; color: #fff; background: radial-gradient(circle at 35% 30%, #c4b5fd, #8b7cf6 60%, #5046d6); }
 .bot-body { flex: 1; min-width: 0; }
 .steps { font-size: 12.5px; color: var(--ink-2); background: var(--surface-2); border-radius: 10px; padding: 8px 12px; margin-bottom: 10px; }
@@ -384,10 +404,28 @@ td.ellipsis { max-width: 220px; }
 .steps li bi-icon { color: var(--good); }
 .steps li.err bi-icon { color: var(--critical); }
 .steps .step-sum { white-space: nowrap; color: var(--ink); }
-.typing { display: flex; gap: 4px; padding: 8px 0; }
-.typing span { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-2); animation: blink 1.2s infinite; }
-.typing span:nth-child(2) { animation-delay: 0.15s; } .typing span:nth-child(3) { animation-delay: 0.3s; }
-@keyframes blink { 50% { opacity: 0.25; } }
+.steps.live { padding: 10px 12px; }
+/* Step timeline: dots joined by a dotted line; the running step pulses. */
+.flow { list-style: none; margin: 6px 0 0; padding: 0; }
+.steps.live .flow { margin: 0; }
+.flow-step { position: relative; display: flex; gap: 10px; padding-bottom: 12px; min-width: 0; }
+.flow-step:last-child { padding-bottom: 0; }
+.flow-step:not(:last-child)::before { content: ""; position: absolute; left: 5px; top: 15px; bottom: 1px; border-left: 2px dotted var(--hair-2); }
+.flow-dot { flex: none; width: 12px; height: 12px; margin-top: 3px; border-radius: 50%; background: var(--surface); border: 2px solid var(--muted); box-sizing: border-box; }
+.flow-step.ok .flow-dot { background: var(--good); border-color: var(--good); }
+.flow-step.err .flow-dot { background: var(--critical); border-color: var(--critical); }
+.flow-step.running .flow-dot { border-color: var(--accent); background: var(--accent-soft); animation: flow-pulse 1.2s ease-in-out infinite; }
+@keyframes flow-pulse { 0%, 100% { box-shadow: 0 0 0 0 var(--accent-soft); } 50% { box-shadow: 0 0 0 5px var(--accent-soft); } }
+@media (prefers-reduced-motion: reduce) { .flow-step.running .flow-dot { animation: none; } }
+.flow-body { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.flow-title { color: var(--ink); line-height: 1.35; }
+.flow-step.stage .flow-title { color: var(--ink-2); }
+.flow-step.stage:not(.running) .flow-title { color: var(--muted); }
+.flow-title code { font-size: 11.5px; color: var(--muted); }
+.flow-args { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.flow-note { font-size: 12px; color: var(--good-ink); overflow-wrap: anywhere; }
+.flow-note.muted { color: var(--muted); }
+.flow-note-err { color: var(--critical-ink); }
 .composer-dock { padding: 10px 24px 18px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
 
 /* suggested questions: one scrollable row above the input during a chat */

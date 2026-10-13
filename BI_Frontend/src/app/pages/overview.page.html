@@ -1,5 +1,6 @@
 <ng-template #delta let-v let-goodUp="goodUp">
-  @if (v != null) {
+  @if (allTime()) {
+  } @else if (v != null) {
     <span class="pill-delta" [class.up]="good(v, goodUp) === true" [class.down]="good(v, goodUp) === false">
       {{ abs(v) }}% <bi-icon [name]="v >= 0 ? 'trend-up' : 'trend-down'" [size]="12" [stroke]="2.4" />
     </span>
@@ -12,7 +13,27 @@
   <h1>Dashboard</h1>
   <div class="toolbar">
     <div class="btn-group">
-      <span class="btn static"><bi-icon name="calendar" /> {{ rangeLabel() }}</span>
+      <div class="menu-anchor">
+        <button type="button" class="btn" [class.on]="custom()" (click)="toggleMenu('calendar', $event)"
+                [attr.aria-expanded]="menu() === 'calendar'" title="Pick dates">
+          <bi-icon name="calendar" /> {{ rangeLabel() }}
+        </button>
+        @if (menu() === 'calendar') {
+          <form class="menu date-menu" (click)="$event.stopPropagation()" (ngSubmit)="applyRange()">
+            <div class="menu-title">Custom range</div>
+            <div class="date-fields">
+              <label>From <input type="date" name="start" [(ngModel)]="draftStart" [max]="draftEnd || today" required /></label>
+              <label>To <input type="date" name="end" [(ngModel)]="draftEnd" [min]="draftStart" [max]="today" required /></label>
+            </div>
+            <div class="date-foot">
+              <span class="muted small">
+                @if (draftDays(); as n) { {{ n }} day{{ n === 1 ? '' : 's' }} } @else { Pick a start and end date }
+              </span>
+              <button type="submit" class="primary-btn" [disabled]="!draftDays()">Apply</button>
+            </div>
+          </form>
+        }
+      </div>
       <div class="menu-anchor">
         <button type="button" class="btn" (click)="toggleMenu('range', $event)" [attr.aria-expanded]="menu() === 'range'">
           {{ periodLabel() }} <bi-icon name="chevron-down" [size]="14" />
@@ -21,7 +42,7 @@
           <div class="menu" (click)="$event.stopPropagation()">
             @for (r of ranges; track r.days) {
               <button type="button" (click)="setDays(r.days)">
-                <span class="check">@if (r.days === days()) { <bi-icon name="check" [size]="15" [stroke]="2.6" /> }</span>{{ r.label }}
+                <span class="check">@if (!custom() && r.days === days()) { <bi-icon name="check" [size]="15" [stroke]="2.6" /> }</span>{{ r.label }}
               </button>
             }
           </div>
@@ -211,7 +232,7 @@
             <div class="hotspot-meta">
               @for (st of n.by_status | keyvalue; track st.key) { <span><bi-status [status]="st.key" /> {{ st.value }}</span> }
             </div>
-            @if (n.sample_reason) { <div class="node-err">{{ n.sample_reason }}</div> }
+            @if (n.sample_reason) { <div class="node-err" [title]="n.sample_reason">{{ n.sample_reason }}</div> }
           </button>
         } @empty { <div class="placeholder"><bi-icon name="check-circle" /> No failed, rejected or waiting nodes in this period.</div> }
       </div>

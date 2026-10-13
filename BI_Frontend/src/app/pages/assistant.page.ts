@@ -5,14 +5,35 @@ import { NgTemplateOutlet } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 
 import { ApiService } from '../api.service';
-import { ChartSpec, ChatTurn } from '../models';
+import { full } from '../format';
+import { ChartSpec, ChatEvent, ChatTurn } from '../models';
 import { ChatChartComponent } from '../shared/chat-chart.component';
 import { IconComponent } from '../shared/icon.component';
 import { MarkdownPipe } from '../shared/markdown.pipe';
+import { printReport } from '../shared/report-pdf';
 import { UiStateService } from '../ui-state.service';
 
 interface Step { id: string; name: string; input: Record<string, unknown>; done: boolean; ok?: boolean; summary?: string; }
-interface Message { role: 'user' | 'assistant'; text: string; steps?: Step[]; charts?: ChartSpec[]; error?: boolean; pending?: boolean; }
+/** One dot in the timeline: a stage the agent went through, or a tool call (index into Message.steps). */
+type FlowItem = { kind: 'status'; text: string; done: boolean } | { kind: 'tool'; step: number };
+interface Message {
+  role: 'user' | 'assistant'; text: string; steps?: Step[]; charts?: ChartSpec[]; error?: boolean; pending?: boolean;
+  /** Everything that happened while answering, in order (older saved chats only have steps). */
+  flow?: FlowItem[];
+}
+
+/** Plain-language names for the MCP tools, shown in the step timeline. */
+const TOOL_LABELS: Record<string, string> = {
+  ping_db: 'Check the database connection', server_info: 'Read server info', list_databases: 'List databases',
+  list_collections: 'List collections', find_collections_like: 'Find collections', collection_exists: 'Check a collection',
+  get_collection_details: 'Read collection details', list_indexes: 'List indexes',
+  infer_collection_schema: 'Read the collection schema', find_fields_like: 'Find fields', field_exists: 'Check a field',
+  get_inferred_relationships: 'Work out how collections link', count_documents: 'Count documents',
+  get_distinct_values: 'List distinct values', run_find: 'Query documents', run_aggregate: 'Run an aggregation',
+  idp_find_submissions: 'Search submissions', idp_get_submission: 'Open a submission', idp_get_run_details: 'Open run details',
+  get_database_overview: 'Survey the database', chart_metric: 'Build a dashboard chart', create_chart: 'Build a chart',
+  show_stat_cards: 'Show stat cards', dashboard_kpis: 'Read the dashboard KPIs',
+};
 interface Conversation { id: string; title: string; updated: number; messages: Message[]; }
 
 const STORE_KEY = 'actuvara-bi.conversations';
@@ -196,12 +217,14 @@ export class AssistantPage implements OnDestroy {
     this.busy.set(true);
     this.abort = new AbortController();
     try {
-      const reply = await this.api.chat(history, this.abort.signal);
+      const reply = await this.api.chatStream(history, (ev) => this.onEvent(id, ev), this.abort.signal);
       this.patchLast(id, (m) => ({
         ...m,
         text: reply.answer,
         charts: reply.charts,
-        steps: reply.steps.map((st, i) => ({ id: String(i), name: st.tool, input: st.input, done: true, ok: st.ok })),
+        // Keep the summaries that arrived while streaming.
+        steps: reply.steps.map((st, i) => ({ id: String(i), name: st.tool, input: st.input, done: true, ok: st.ok,
+                                             summary: m.steps?.[i]?.summary })),
       }));
     } catch (err) {
       const aborted = (err as Error).name === 'AbortError';
@@ -212,12 +235,51 @@ export class AssistantPage implements OnDestroy {
           : msg && !/fetch/i.test(msg) ? msg : 'Could not reach the BI API server. Is `python api_server.py` running?',
       }));
     } finally {
-      this.patchLast(id, (m) => ({ ...m, pending: false, text: m.text || (m.charts?.length ? '' : '_(no answer)_') }));
+      this.patchLast(id, (m) => ({
+        ...m, pending: false, flow: m.flow && this.stagesDone(m.flow),
+        text: m.text || (m.charts?.length ? '' : '_(no answer)_'),
+      }));
       this.busy.set(false);
       this.abort = null;
       this.scrollDown();
     }
   }
+
+  /** Live progress from the stream: each stage and tool call becomes a dot; a new one ends the stage before it. */
+  private onEvent(id: string, ev: ChatEvent) {
+    this.patchLast(id, (m) => {
+      if (ev.type === 'status') {
+        return { ...m, flow: [...this.stagesDone(m.flow ?? []), { kind: 'status', text: ev.text, done: false }] };
+      }
+      const steps = [...(m.steps ?? [])];
+      if (ev.state === 'running') {
+        steps[ev.id] = { id: String(ev.id), name: ev.tool, input: ev.input, done: false };
+        return { ...m, steps, flow: [...this.stagesDone(m.flow ?? []), { kind: 'tool', step: ev.id }] };
+      }
+      if (steps[ev.id]) steps[ev.id] = { ...steps[ev.id], done: true, ok: ev.ok, summary: ev.summary };
+      return { ...m, steps };
+    });
+    this.scrollDown();
+  }
+
+  private stagesDone(flow: FlowItem[]): FlowItem[] {
+    return flow.map((f) => (f.kind === 'status' && !f.done ? { ...f, done: true } : f));
+  }
+
+  /** Timeline items for a message; chats saved before stages were recorded only have their tool calls. */
+  flowOf(m: Message): FlowItem[] {
+    return m.flow ?? (m.steps ?? []).map((_, i) => ({ kind: 'tool' as const, step: i }));
+  }
+
+  /** Save one answer as a PDF report (print dialog -> Save as PDF). */
+  downloadPdf(ev: Event) {
+    const body = (ev.currentTarget as HTMLElement).closest<HTMLElement>('.bot-body');
+    if (body) printReport({ content: body });
+  }
+
+  full = full;
+
+  toolLabel(name: string) { return TOOL_LABELS[name] ?? name.replace(/_/g, ' '); }
 
   private scrollDown() {
     setTimeout(() => {

@@ -2,7 +2,7 @@ import { KeyValuePipe, NgTemplateOutlet } from '@angular/common';
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
-import { ApiService } from '../api.service';
+import { ApiService, DateRange } from '../api.service';
 import { compact, duration, full, SOURCE_LABEL, statusRole } from '../format';
 import { NodeHotspot, Overview, ProcessRow, SubmissionRow, Trend } from '../models';
 import { FlowBucket, FlowChartComponent, FlowSeries } from '../shared/flow-chart.component';
@@ -17,6 +17,15 @@ import { load, loadable } from './load';
 const MONTH = { month: 'short' } as const;
 const DAY_MONTH = { day: '2-digit', month: 'short' } as const;
 
+/** Local calendar date as YYYY-MM-DD (what <input type="date"> uses). */
+function isoDay(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+/** Days from start to end, both included. */
+function dayCount(start: string, end: string): number {
+  return Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 864e5) + 1;
+}
+
 @Component({
   selector: 'bi-overview',
   imports: [FormsModule, KeyValuePipe, NgTemplateOutlet, FlowChartComponent, GaugeComponent, IconComponent, StatusBadgeComponent,
@@ -29,9 +38,19 @@ export class OverviewPage {
   private api = inject(ApiService);
   ui = inject(UiStateService);
 
-  ranges = [{ days: 7, label: 'Last 7 days' }, { days: 30, label: 'Last 30 days' }, { days: 90, label: 'Last 90 days' }];
-  days = signal(30);
-  menu = signal<'range' | 'filter' | 'weekday' | null>(null);
+  ranges = [{ days: 0, label: 'All time' }, { days: 7, label: 'Last 7 days' }, { days: 30, label: 'Last 30 days' }, { days: 90, label: 'Last 90 days' }];
+  /** Preset length in days; 0 = all time (the default). */
+  days = signal(0);
+  /** A range picked on the calendar; null while a preset (`days`) is in use. */
+  custom = signal<DateRange | null>(null);
+  /** Length of the period shown, in days. */
+  span = computed(() => { const c = this.custom(); return c ? dayCount(c.start, c.end) : this.days(); });
+  /** No period to compare with, so change badges are hidden. */
+  allTime = computed(() => !this.custom() && this.days() === 0);
+  today = isoDay(new Date());
+  draftStart = '';
+  draftEnd = '';
+  menu = signal<'calendar' | 'range' | 'filter' | 'weekday' | null>(null);
   hiddenSources = signal<Set<string>>(new Set());
   weekdayMetric = signal<'runs' | 'submissions'>('runs');
   selected = signal<Set<string>>(new Set());
@@ -52,6 +71,7 @@ export class OverviewPage {
 
   setDays(d: number) {
     this.days.set(d);
+    this.custom.set(null);
     this.menu.set(null);
     this.selected.set(new Set());
     this.refresh();
@@ -59,18 +79,45 @@ export class OverviewPage {
 
   refresh() {
     const d = this.days();
-    load(this.api.overview(d), this.overview);
-    load(this.api.trend(d), this.trend);
-    load(this.api.processes(d), this.processes);
-    load(this.api.nodeHotspots(d), this.hotspots);
+    const r = this.custom() ?? undefined;
+    load(this.api.overview(d, r), this.overview);
+    load(this.api.trend(d, r), this.trend);
+    load(this.api.processes(d, r), this.processes);
+    load(this.api.nodeHotspots(d, r), this.hotspots);
   }
 
-  toggleMenu(m: 'range' | 'filter' | 'weekday', ev: Event) {
+  toggleMenu(m: 'calendar' | 'range' | 'filter' | 'weekday', ev: Event) {
     ev.stopPropagation();
+    if (m === 'calendar' && this.menu() !== 'calendar') {
+      // Start the pickers on the period currently shown.
+      const c = this.custom();
+      const first = this.trend().data?.rows[0]?.date;
+      this.draftStart = c?.start ?? (this.days() ? isoDay(new Date(Date.now() - (this.days() - 1) * 864e5))
+        : first ?? isoDay(new Date(Date.now() - 29 * 864e5)));
+      this.draftEnd = c?.end ?? this.today;
+    }
     this.menu.set(this.menu() === m ? null : m);
   }
 
-  ask(q: string) { this.ui.ask(`${q} (Dashboard period: the last ${this.days()} days.)`); }
+  draftDays() {
+    return this.draftStart && this.draftEnd && this.draftStart <= this.draftEnd ? dayCount(this.draftStart, this.draftEnd) : 0;
+  }
+
+  applyRange() {
+    if (!this.draftDays()) return;
+    this.custom.set({ start: this.draftStart, end: this.draftEnd });
+    this.menu.set(null);
+    this.selected.set(new Set());
+    this.refresh();
+  }
+
+  periodText() {
+    const c = this.custom();
+    if (c) return `from ${c.start} to ${c.end} (${this.span()} days)`;
+    return this.days() ? `the last ${this.days()} days` : 'all time';
+  }
+
+  ask(q: string) { this.ui.ask(`${q} (Dashboard period: ${this.periodText()}.)`); }
 
   askNode(n: NodeHotspot) {
     const where = n.process ? ` in the "${n.process}" process` : '';
@@ -79,17 +126,26 @@ export class OverviewPage {
 
   // --- header ------------------------------------------------------------------
   rangeLabel = computed(() => {
+    const c = this.custom();
+    if (c) {
+      const day = (s: string) => new Date(`${s}T00:00:00`).toLocaleDateString(undefined, DAY_MONTH);
+      return `${day(c.start)} – ${day(c.end)}`;
+    }
     const o = this.overview().data;
     const valid = (d: Date) => !Number.isNaN(d.getTime());
     let to = new Date(o?.to ?? '');
-    let from = new Date(o?.from ?? '');
+    // All time has no "from": start at the first day with data.
+    let from = new Date(o?.from ?? (this.trend().data?.rows[0]?.date ? `${this.trend().data!.rows[0].date}T00:00:00` : ''));
     if (!valid(to) || !valid(from)) {
       to = new Date();
       from = new Date(Date.now() - this.days() * 864e5);
     }
     return `${from.toLocaleDateString(undefined, DAY_MONTH)} – ${to.toLocaleDateString(undefined, DAY_MONTH)}`;
   });
-  periodLabel = computed(() => this.ranges.find((r) => r.days === this.days())?.label ?? '');
+  periodLabel = computed(() => {
+    const n = this.span();
+    return this.custom() ? `${n} day${n === 1 ? '' : 's'}` : this.ranges.find((r) => r.days === n)?.label ?? `Last ${n} days`;
+  });
 
   toggleSource(key: string, ev: Event) {
     ev.stopPropagation();
@@ -106,9 +162,10 @@ export class OverviewPage {
     const c = o.current;
     return [
       { icon: 'inbox', title: 'Total submissions', value: full(c.submissions), delta: o.change_pct['submissions'],
-        goodUp: true, info: `Emails, webhooks and manual uploads received in the last ${o.days} days, vs the ${o.days} days before.` },
+        goodUp: true, info: this.allTime() ? 'All emails, webhooks and manual uploads received so far.'
+          : `Emails, webhooks and manual uploads received in ${this.custom() ? 'the selected' : 'the last'} ${o.days} days, vs the ${o.days} days before.` },
       { icon: 'files', title: 'Files received', value: full(c.files), delta: o.change_pct['files'], goodUp: true,
-        info: 'Files attached to those submissions (documents fetched by API connectors are not counted).' },
+        info: 'Files sent in with those submissions (their attachments). Files created by workflows (API connector fetches, correction re-uploads) are not counted.' },
       { icon: 'gauge', title: 'Run success rate', value: c.success_rate == null ? '–' : `${c.success_rate}%`,
         delta: o.change_pct['success_rate'], goodUp: true,
         info: 'Share of extraction runs in the period whose status is completed.' },
@@ -127,7 +184,7 @@ export class OverviewPage {
   flowBuckets = computed<FlowBucket[]>(() => {
     const t = this.trend().data;
     if (!t) return [];
-    const days = this.days();
+    const days = this.span() || t.rows.length;  // all time: size buckets by the days with data
     const groups = new Map<string, { label: string; title: string; values: Record<string, number> }>();
     t.rows.forEach((r, i) => {
       const d = new Date(`${r.date}T00:00:00`);
@@ -136,7 +193,7 @@ export class OverviewPage {
         key = r.date; label = d.toLocaleDateString(undefined, { weekday: 'short' });
         title = d.toLocaleDateString(undefined, DAY_MONTH);
       } else if (days <= 31) {
-        // 7-day buckets counted back from today; rows are oldest-first, so the first row
+        // 7-day buckets counted back from the last day; rows are oldest-first, so the first row
         // seen for a bucket is its start date.
         key = `w${Math.floor((t.rows.length - 1 - i) / 7)}`;
         label = d.toLocaleDateString(undefined, DAY_MONTH);
@@ -157,7 +214,7 @@ export class OverviewPage {
 
   submissionsIncrease = computed(() => {
     const o = this.overview().data;
-    return o ? o.current.submissions - o.previous.submissions : null;
+    return o?.previous ? o.current.submissions - o.previous.submissions : null;
   });
 
   // --- weekday ------------------------------------------------------------------
@@ -176,7 +233,7 @@ export class OverviewPage {
   weekdayDelta = computed(() => this.overview().data?.change_pct[this.weekdayMetric() === 'runs' ? 'runs' : 'submissions'] ?? null);
   weekdayIncrease = computed(() => {
     const o = this.overview().data;
-    if (!o) return null;
+    if (!o?.previous) return null;
     return this.weekdayMetric() === 'runs' ? o.current.runs - o.previous.runs : o.current.submissions - o.previous.submissions;
   });
 
@@ -223,7 +280,7 @@ export class OverviewPage {
       lines.push('Summary', 'metric,current,previous,change_pct');
       for (const k of ['submissions', 'files', 'runs', 'completed_runs', 'failed_runs', 'success_rate',
                        'avg_processing_s', 'avg_confidence'] as const) {
-        lines.push([k, o.current[k], o.previous[k], o.change_pct[k]].map(esc).join(','));
+        lines.push([k, o.current[k], o.previous?.[k], o.change_pct[k]].map(esc).join(','));
       }
       lines.push('');
     }
@@ -240,7 +297,9 @@ export class OverviewPage {
     const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `actuvara-bi-last-${this.days()}-days.csv`;
+    const c = this.custom();
+    a.download = c ? `actuvara-bi-${c.start}-to-${c.end}.csv`
+      : this.days() ? `actuvara-bi-last-${this.days()}-days.csv` : 'actuvara-bi-all-time.csv';
     a.click();
     URL.revokeObjectURL(a.href);
   }

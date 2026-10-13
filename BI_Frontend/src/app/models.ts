@@ -25,8 +25,8 @@ export interface Period {
 export interface FunnelStage { stage: string; value: number; }
 
 export interface Overview {
-  days: number; from: string; to: string; previous_from: string;
-  current: Period; previous: Period;
+  days: number; from: string | null; to: string; previous_from: string | null;
+  current: Period; previous: Period | null;  // null for all time
   change_pct: Record<string, number | null>;
   funnel: FunnelStage[];
 }
@@ -83,7 +83,7 @@ export interface RunDetails {
 /** Chart spec returned by the assistant (BI_Backend/charts.py). */
 export interface ChartSpec {
   title: string;
-  type: 'bar' | 'hbar' | 'line' | 'pie' | 'doughnut' | 'table' | 'kpi' | 'error';
+  type: 'bar' | 'hbar' | 'line' | 'pie' | 'doughnut' | 'table' | 'kpi' | 'stats' | 'error';
   labels?: string[];
   series?: { name: string; data: (number | null)[] }[];
   columns?: string[];
@@ -92,9 +92,17 @@ export interface ChartSpec {
   unit?: string;
   note?: string;
   error?: string;
+  /** type 'stats': headline numbers shown as cards above the answer text. */
+  cards?: { label: string; value: number; unit?: string; detail?: string }[];
 }
 
 export interface ChatTurn { role: 'user' | 'assistant'; content: string; }
+
+/** Progress event from POST /api/chat/stream (one JSON object per line). */
+export type ChatEvent =
+  | { type: 'status'; text: string }
+  | { type: 'step'; id: number; state: 'running'; tool: string; input: Record<string, unknown> }
+  | { type: 'step'; id: number; state: 'done'; ok: boolean; summary: string };
 
 /** POST /api/chat reply. */
 export interface ChatReply {
