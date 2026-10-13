@@ -6,7 +6,9 @@ Every query here is a fixed find / aggregate pipeline built in this module
 Time windows use the creation time embedded in each document's ObjectId
 (`_id`), so they work the same for every collection, use the `_id` index and
 don't depend on how a collection names or types its date fields. `days <= 0`
-means all time (no window).
+means all time (no window). Passing `start` and `end` (calendar dates, UTC, both
+included) instead picks an exact range; it is compared with the same number of
+days just before it.
 """
 from __future__ import annotations
 
@@ -29,6 +31,23 @@ def _window(days: int, now: dt.datetime | None = None) -> tuple[dt.datetime, dt.
     now = now or dt.datetime.now(dt.timezone.utc)
     start = now - dt.timedelta(days=days)
     return start - dt.timedelta(days=days), start, now
+
+
+def _span(days: int, start: dt.date | None = None, end: dt.date | None = None
+          ) -> tuple[dt.datetime, dt.datetime, dt.datetime | None, int]:
+    """(previous period start, period start, period end or None for "until now", length in days).
+    With `start` and `end` the period is those calendar days (UTC), end day included."""
+    if start is None or end is None:
+        prev_start, begin, _ = _window(days)
+        return prev_start, begin, None, days
+    if start > end:
+        raise ValueError("start must be on or before end")
+    length = (end - start).days + 1
+    if length > MAX_DAYS:
+        raise ValueError(f"the range can be at most {MAX_DAYS} days")
+    begin = dt.datetime.combine(start, dt.time(), dt.timezone.utc)
+    stop = dt.datetime.combine(end + dt.timedelta(days=1), dt.time(), dt.timezone.utc)
+    return begin - (stop - begin), begin, stop, length
 
 
 def _start(days: int) -> dt.datetime | None:
@@ -57,11 +76,30 @@ class BiAnalytics:
     def __init__(self, db) -> None:
         self.db = db
 
+    @staticmethod
+    def _range(days: int, start: dt.date | None, end: dt.date | None) -> dict[str, Any]:
+        """_id filter for the last `days` days (all time if days <= 0) or for start..end."""
+        if start is None and _start(days) is None:
+            return {}
+        _, begin, stop, _ = _span(days, start, end)
+        return _id_range(begin, stop)
+
     # --- KPIs ----------------------------------------------------------------
     def _period(self, start: dt.datetime | None, end: dt.datetime | None) -> dict[str, Any]:
         rng = _id_range(start, end)
         by_source = {src: self.db[coll].count_documents(rng) for src, coll in SOURCE_COLLECTIONS.items()}
-        files = self.db.files.count_documents({**rng, "metadata.parent_ref_id": {"$exists": False}})
+        # Files received = files sent in with the submissions of this period, from each submission's
+        # attachments list (emails may only store attachment_count). This also counts uploads whose file
+        # document was deleted later, and leaves out files that workflows create themselves (API connector
+        # fetches, node-correction re-uploads), which are never listed as attachments.
+        files = 0
+        for coll in SOURCE_COLLECTIONS.values():
+            for r in self.db[coll].aggregate([
+                {"$match": rng},
+                {"$group": {"_id": None, "n": {"$sum": {"$cond": [
+                    {"$isArray": "$attachments"}, {"$size": "$attachments"}, {"$ifNull": ["$attachment_count", 0]}]}}}},
+            ]):
+                files += r["n"]
         runs = list(self.db.extraction_results.aggregate([
             {"$match": rng},
             {"$group": {"_id": "$status", "n": {"$sum": 1},
@@ -95,10 +133,11 @@ class BiAnalytics:
             "avg_confidence": round(conf, 3) if conf is not None else None,
         }
 
-    def _file_funnel(self, start: dt.datetime | None, files_received: int) -> list[dict[str, Any]]:
+    def _file_funnel(self, start: dt.datetime | None, files_received: int,
+                     end: dt.datetime | None = None) -> list[dict[str, Any]]:
         """Files received in the window and how far they got. Every stage counts files, so
         each stage is a subset of the one before (a file can have several runs)."""
-        file_ids = {"$gte": ObjectId.from_datetime(start)} if start is not None else {"$ne": None}
+        file_ids = _id_range(start, end).get("_id") or {"$ne": None}
         rows = list(self.db.extraction_results.aggregate([
             {"$match": {"file_id": file_ids}},  # runs of files created in the window
             {"$group": {"_id": "$file_id",
@@ -117,30 +156,33 @@ class BiAnalytics:
             {"stage": "Validated", "value": agg["validated"]},
         ]
 
-    def overview(self, days: int = 30) -> dict[str, Any]:
-        if _start(days) is None:  # all time: there is no previous period to compare with
+    def overview(self, days: int = 30, start: dt.date | None = None, end: dt.date | None = None) -> dict[str, Any]:
+        if start is None and _start(days) is None:  # all time: there is no previous period to compare with
             cur = self._period(None, None)
             return {"days": 0, "from": None, "to": dt.datetime.now(dt.timezone.utc).isoformat(),
                     "previous_from": None, "current": cur, "previous": None,
                     "change_pct": {k: None for k in ("submissions", "files", "runs", "completed_runs", "failed_runs",
                                                      "success_rate", "avg_processing_s", "avg_confidence")},
                     "funnel": self._file_funnel(None, cur["files"])}
-        prev_start, start, now = _window(days)
-        cur = self._period(start, None)
-        prev = self._period(prev_start, start)
+        prev_start, begin, stop, length = _span(days, start, end)
+        cur = self._period(begin, stop)
+        prev = self._period(prev_start, begin)
         change = {k: _pct_change(cur[k], prev[k])
                   for k in ("submissions", "files", "runs", "completed_runs", "failed_runs",
                             "success_rate", "avg_processing_s", "avg_confidence")}
-        return {"days": days, "from": start.isoformat(), "to": now.isoformat(),
+        now = dt.datetime.now(dt.timezone.utc)
+        # "to" is the last moment included, so a picked range reports its own end date.
+        to = min(stop - dt.timedelta(seconds=1), now) if stop else now
+        return {"days": length, "from": begin.isoformat(), "to": to.isoformat(),
                 "previous_from": prev_start.isoformat(),
                 "current": cur, "previous": prev, "change_pct": change,
-                "funnel": self._file_funnel(start, cur["files"])}
+                "funnel": self._file_funnel(begin, cur["files"], stop)}
 
     # --- daily trend ----------------------------------------------------------
-    def _daily_counts(self, collection: str, start: dt.datetime) -> dict[str, int]:
+    def _daily_counts(self, collection: str, start: dt.datetime, end: dt.datetime | None = None) -> dict[str, int]:
         try:
             rows = self.db[collection].aggregate([
-                {"$match": _id_range(start)},
+                {"$match": _id_range(start, end)},
                 {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": {"$toDate": "$_id"}}},
                             "n": {"$sum": 1}}},
             ])
@@ -148,7 +190,7 @@ class BiAnalytics:
         except Exception:
             # Some servers lack $toDate on ObjectId - bucket the ids here instead.
             out: dict[str, int] = {}
-            for d in self.db[collection].find(_id_range(start), {"_id": 1}, limit=TREND_SCAN_CAP):
+            for d in self.db[collection].find(_id_range(start, end), {"_id": 1}, limit=TREND_SCAN_CAP):
                 day = d["_id"].generation_time.strftime("%Y-%m-%d")
                 out[day] = out.get(day, 0) + 1
             return out
@@ -162,29 +204,33 @@ class BiAnalytics:
                 times.append(doc["_id"].generation_time)
         return min(times, default=None)
 
-    def trend(self, days: int = 30) -> dict[str, Any]:
-        _, start, now = _window(days)
-        if _start(days) is None:  # all time: start at the first day with data
-            start = self._first_created() or now
-        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
-        series = {src: self._daily_counts(coll, start) for src, coll in SOURCE_COLLECTIONS.items()}
-        runs = self._daily_counts("extraction_results", start)
+    def trend(self, days: int = 30, start: dt.date | None = None, end: dt.date | None = None) -> dict[str, Any]:
+        all_time = start is None and _start(days) is None
+        now = dt.datetime.now(dt.timezone.utc)
+        if all_time:  # start at the first day with data
+            begin, stop, length = self._first_created() or now, None, 0
+        else:
+            _, begin, stop, length = _span(days, start, end)
+        begin = begin.replace(hour=0, minute=0, second=0, microsecond=0)
+        last_day = min((stop - dt.timedelta(days=1)).date(), now.date()) if stop else now.date()
+        series = {src: self._daily_counts(coll, begin, stop) for src, coll in SOURCE_COLLECTIONS.items()}
+        runs = self._daily_counts("extraction_results", begin, stop)
         rows = []
-        day = start
-        while day.date() <= now.date():
+        day = begin
+        while day.date() <= last_day:
             key = day.strftime("%Y-%m-%d")
             rows.append({"date": key, **{src: series[src].get(key, 0) for src in series},
                          "runs": runs.get(key, 0)})
             day += dt.timedelta(days=1)
         peak = max(rows, key=lambda r: sum(r[s] for s in series), default=None)
-        return {"days": days if _start(days) else 0, "sources": list(series), "rows": rows,
+        return {"days": length, "sources": list(series), "rows": rows,
                 "peak": peak["date"] if peak and any(peak[s] for s in series) else None}
 
     # --- processes ------------------------------------------------------------
-    def processes(self, days: int = 30, limit: int = 12) -> list[dict[str, Any]]:
-        start = _start(days)
+    def processes(self, days: int = 30, limit: int = 12,
+                  start: dt.date | None = None, end: dt.date | None = None) -> list[dict[str, Any]]:
         rows = list(self.db.extraction_results.aggregate([
-            {"$match": _id_range(start)},
+            {"$match": self._range(days, start, end)},
             {"$group": {"_id": {"p": "$proccess_id", "s": "$status"}, "n": {"$sum": 1},
                         "ms": {"$avg": "$total_processing_time_ms"}}},
         ]))
@@ -217,11 +263,11 @@ class BiAnalytics:
         return out
 
     # --- node hotspots --------------------------------------------------------
-    def node_hotspots(self, days: int = 30, limit: int = 10) -> list[dict[str, Any]]:
+    def node_hotspots(self, days: int = 30, limit: int = 10,
+                      start: dt.date | None = None, end: dt.date | None = None) -> list[dict[str, Any]]:
         """Workflow nodes that most often fail, get rejected or wait for approval."""
-        start = _start(days)
         rows = list(self.db.file_process_tracker.aggregate([
-            {"$match": {**_id_range(start), "status": {"$in": sorted(ATTENTION)}}},
+            {"$match": {**self._range(days, start, end), "status": {"$in": sorted(ATTENTION)}}},
             {"$group": {"_id": {"node": "$node_id", "s": "$status"}, "n": {"$sum": 1},
                         "sub_type": {"$first": "$node_data.node_sub_type"},
                         "run": {"$first": "$extraction_result_id"},

@@ -3,7 +3,7 @@ read-only tools the MCP server exposes, and attaches charts built from real
 query results.
 
 The model never writes chart numbers itself: `create_chart` takes an
-aggregation pipeline, this module runs it (through query_guard, read-only) and
+aggregation pipeline, this module runs it (through the MCP server's read-only run_aggregate) and
 turns the rows into a chart spec. The chart and the text come from the same data.
 
 Configuration (.env) - the first provider whose key is set is used:
@@ -18,12 +18,13 @@ optional for Claude: CHAT_EFFORT.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import datetime as dt
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import anthropic
@@ -31,7 +32,6 @@ import openai
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from bi_analytics import metric_rows
 from charts import CHART_TYPES, from_rows
 
 MODEL = os.getenv("CHAT_MODEL", "claude-opus-5-5")
@@ -44,6 +44,7 @@ AZURE_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
 MAX_TURNS = 15               # model <-> tool round trips per question
 MAX_RESULT_CHARS = 40_000    # per tool result, keeps the context small
 MAX_CHARTS = 4
+MAX_STAT_CARDS = 6
 
 SYSTEM_PROMPT = """You are the analytics assistant for Actuvara's IDP (intelligent document processing) platform.
 You answer questions about the data in its MongoDB database (Azure Cosmos DB for MongoDB vCore) by calling the
@@ -87,6 +88,19 @@ Label charts and answers with names, never raw ids when a name exists. For proce
 "name". Likewise use emails.subject / webhooks.reference_subject / files.filename instead of ids where it helps.
 Only mention a chart in your answer if a chart tool returned "charted": true; if one failed or found no data, say so.
 
+Stat cards: when the question is about counts, totals, rates or other headline figures ("how many ...", "total
+...", "success rate", an overview or report), ALWAYS call show_stat_cards (once, before you answer) with the 2-6
+key numbers - e.g. Total submissions, Files received, Runs, Success rate - each with a short label and, if useful,
+a unit ("%", "s") and a
+short detail ("last 30 days", "34 webhook, 70 manual"). The values must be exactly as a tool returned them (or the
+total of a column of returned rows); others are rejected. The cards appear above your text, so do not list the
+same numbers again - say what they mean. Do not use cards for a single yes/no, ids or long lists.
+For headline figures - submissions, files received, runs, completed / failed runs, run success rate, average
+processing time - call dashboard_kpis first: it returns them exactly as the dashboard shows them.
+Rates and percentages: never divide numbers yourself - take them from dashboard_kpis, or compute them in a query
+(run_aggregate with $group and $divide) so a tool returns the value. Run success rate = completed extraction_results
+/ ALL extraction_results x 100 (runs, not submissions or files).
+
 Every number, name or id in an answer must come from a tool you called while answering THIS question - earlier
 answers in the conversation may be wrong, so look again. Never say a value came from a tool you did not call.
 
@@ -101,6 +115,12 @@ result shows it.
 
 Answer format: start with the direct answer in one or two sentences, then any short supporting detail in Markdown.
 Do not repeat every number a chart shows - mention the key ones. Keep ids exactly as returned.
+
+Reports and PDFs: the app shows a "Download PDF" button under every answer, which saves that answer - text,
+charts and tables - as a PDF report. So never say you cannot create PDFs or files. When the user asks for a report
+(PDF or not), write the answer as one: a "## " title naming the subject and period, a short summary of the key
+numbers, then "### " sections with the findings, adding charts (chart tools) and tables where they help. End with
+one line telling the user to click "Download PDF" below the answer to save it.
 """
 
 
@@ -191,6 +211,19 @@ def _schema(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
 S = {"type": "string"}
 
 TOOLS: list[dict[str, Any]] = [
+    {"name": "show_stat_cards",
+     "description": "Show headline numbers as small stat cards above your answer (counts, totals, rates). Each value "
+                    "must be a number a tool returned while answering this question, or the total of one column of "
+                    "rows a tool returned - anything else is rejected. Call it once, after you have the numbers; a "
+                    "second call replaces the cards.",
+     "input_schema": _schema({
+         "cards": {"type": "array", "minItems": 1, "maxItems": MAX_STAT_CARDS, "items": _schema({
+             "label": {"type": "string", "description": "Short name, e.g. 'Total submissions'"},
+             "value": {"type": "number"},
+             "unit": {"type": "string", "description": "Optional, e.g. '%' or 's'"},
+             "detail": {"type": "string", "description": "Optional short context, e.g. 'last 30 days'"},
+         }, ["label", "value"])},
+     }, ["cards"])},
     {"name": "create_chart",
      "description": "Attach a chart to your answer. The pipeline runs on `collection` and each output row becomes one "
                     "point: x_field gives the label (category or date string), y_fields the numeric values (one series "
@@ -236,6 +269,72 @@ OPENAI_TOOLS = [{"type": "function", "function": {"name": t["name"], "descriptio
                                                   "parameters": t["input_schema"]}} for t in TOOLS]
 
 
+# Progress callback for the question being answered. A context variable, not an attribute, because one
+# ChatAgent serves concurrent requests; asyncio tasks and asyncio.to_thread carry it along.
+_EMIT: contextvars.ContextVar[Callable[[dict[str, Any]], None] | None] = contextvars.ContextVar("emit", default=None)
+
+
+# Numbers the tools returned while answering the current question; stat card values must be among them.
+_SEEN: contextvars.ContextVar[set[float] | None] = contextvars.ContextVar("seen", default=None)
+
+
+def _remember_numbers(value: Any) -> None:
+    """Record every number in a tool result, plus the total of each numeric column of a list of rows."""
+    seen = _SEEN.get()
+    if seen is None:
+        return
+    if isinstance(value, bool):
+        return
+    if isinstance(value, (int, float)):
+        seen.add(round(float(value), 4))
+    elif isinstance(value, dict):
+        for v in value.values():
+            _remember_numbers(v)
+    elif isinstance(value, list):
+        for v in value:
+            _remember_numbers(v)
+        rows = [r for r in value if isinstance(r, dict)]
+        for key in {k for r in rows for k, v in r.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}:
+            seen.add(round(sum(float(r[key]) for r in rows
+                               if isinstance(r.get(key), (int, float)) and not isinstance(r.get(key), bool)), 4))
+
+
+def _grounded(value: float) -> bool:
+    """True if value is a number a tool returned (allowing for display rounding to 1 decimal). Ratios the model
+    works out itself are not accepted: it can divide the wrong pair (completed runs / submissions)."""
+    return any(abs(value - n) <= 0.051 for n in (_SEEN.get() or ()))
+
+
+def _emit(event: dict[str, Any]) -> None:
+    emit = _EMIT.get()
+    if emit is not None:
+        try:
+            emit(event)
+        except Exception as ex:  # a broken listener must not break the answer
+            _log(f"progress listener failed: {type(ex).__name__}: {ex}")
+
+
+def _step_summary(value: Any, is_error: bool, content: str) -> str:
+    """One short line describing a tool result, shown under the step in the UI."""
+    if is_error:
+        err = value.get("error") if isinstance(value, dict) else None
+        return str(err or content)[:160]
+    if isinstance(value, dict) and "result" in value and "date_warning" in value:
+        value = value["result"]
+    if not isinstance(value, dict):
+        return ""
+    if "cards_shown" in value:
+        return f"{value['cards_shown']} stat cards shown"
+    if "charted" in value:
+        return f"Chart added ({value.get('row_count', 0)} rows)" if value["charted"] else "No chart - no matching data"
+    if "row_count" in value:
+        n = value.get("total_found", value["row_count"])
+        return f"{n} row{'' if n == 1 else 's'}"
+    if "document_count" in value:
+        return f"{value['document_count']} documents"
+    return ""
+
+
 class ChatAgent:
     def __init__(self) -> None:
         self.client, self.fallback_args = _make_client()
@@ -254,10 +353,20 @@ class ChatAgent:
         return text
 
     # --- conversation ----------------------------------------------------------
-    def answer(self, history: list[dict[str, str]]) -> dict[str, Any]:
+    def answer(self, history: list[dict[str, str]],
+               on_event: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
         """history: [{"role": "user" | "assistant", "content": str}, ...] ending with the user's question.
-        Returns {"answer": markdown, "charts": [spec], "steps": [{"tool", "input", "ok"}]}."""
-        return asyncio.run(self._answer_with_mcp(history))
+        Returns {"answer": markdown, "charts": [spec], "steps": [{"tool", "input", "ok"}]}.
+        on_event, if given, is called with progress events while the answer is worked out:
+          {"type": "status", "text"}                                   what the agent is doing
+          {"type": "step", "id", "tool", "input", "state": "running"}  a tool call started
+          {"type": "step", "id", "state": "done", "ok", "summary"}     ... and finished"""
+        token, seen_token = _EMIT.set(on_event), _SEEN.set(set())
+        try:
+            return asyncio.run(self._answer_with_mcp(history))
+        finally:
+            _EMIT.reset(token)
+            _SEEN.reset(seen_token)
 
     async def _answer_with_mcp(self, history: list[dict[str, str]]) -> dict[str, Any]:
         messages: list[dict[str, Any]] = [{"role": h["role"], "content": h["content"]}
@@ -268,15 +377,49 @@ class ChatAgent:
         server_path = Path(__file__).with_name("mcp_server.py")
         params = StdioServerParameters(command=sys.executable, args=[str(server_path)],
                                        cwd=str(server_path.parent))
+        _emit({"type": "status", "text": "Connecting to the MCP server"})
         async with stdio_client(params) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
                 mcp_tools = (await session.list_tools()).tools
+                _emit({"type": "status", "text": f"Connected - {len(mcp_tools)} database tools available"})
                 if USE_AZURE_OPENAI:
                     return await self._loop_openai(messages, charts, steps, warned, session, mcp_tools)
                 # Pins this question's follow-up requests to whichever model accepted (Foundry middleware).
                 with anthropic.BetaFallbackState():
                     return await self._loop(messages, charts, steps, warned, session, mcp_tools)
+
+    @staticmethod
+    def _chart_count(charts: list[dict[str, Any]]) -> int:
+        return sum(1 for c in charts if c.get("type") != "stats")
+
+    @staticmethod
+    def _stat_cards(args: dict[str, Any], charts: list[dict[str, Any]]) -> tuple[dict[str, Any], bool]:
+        """Validate the cards against the numbers tools returned, then add (or replace) the stats spec.
+        Cards that pass are shown even if others are rejected; the model is told which ones were dropped."""
+        cards = []
+        rejected = []
+        for card in (args.get("cards") or [])[:MAX_STAT_CARDS]:
+            label = str(card.get("label") or "").strip()[:40]
+            unit = str(card.get("unit") or "")[:8]
+            try:
+                value = float(card.get("value"))
+            except (TypeError, ValueError):
+                rejected.append(f"{label or '?'} (not a number)")
+                continue
+            if not label or not _grounded(value):
+                rejected.append(f"{label or '?'}={card.get('value')}")
+                continue
+            cards.append({"label": label, "value": int(value) if value.is_integer() else value,
+                          "unit": unit, "detail": str(card.get("detail") or "")[:60]})
+        note = ("Not shown - not returned by any tool while answering this question: " + ", ".join(rejected)
+                + ". Use the exact number a tool returned, or run a query that returns it.") if rejected else ""
+        if not cards:
+            return {"error": note or "no cards given"}, True
+        _log(f"stat cards: {len(cards)} shown" + (f", rejected {', '.join(rejected)}" if rejected else ""))
+        charts[:] = [c for c in charts if c.get("type") != "stats"]
+        charts.insert(0, {"title": "", "type": "stats", "cards": cards})
+        return {"cards_shown": len(cards), **({"note": note} if note else {})}, False
 
     @staticmethod
     def _mcp_value(result: Any) -> Any:
@@ -294,6 +437,8 @@ class ChatAgent:
     async def _call_tool(self, name: str, args: dict[str, Any], charts: list[dict[str, Any]],
                          steps: list[dict[str, Any]], warned: set[str], session: ClientSession,
                          mcp_tool_names: set[str]) -> tuple[str, bool]:
+        step_id = len(steps)
+        _emit({"type": "step", "id": step_id, "tool": name, "input": args, "state": "running"})
         warning = date_warning(args)
         key = name + json.dumps(args, sort_keys=True, default=str)
         if warning and name == "create_chart" and key not in warned:
@@ -303,10 +448,15 @@ class ChatAgent:
                            "note": "Not charted yet. Fix the date and call again, or re-send this exact call "
                                    "if the date is intended."}
             steps.append({"tool": name, "input": args, "ok": True})
+            _emit({"type": "step", "id": step_id, "state": "done", "ok": True,
+                   "summary": "Date looks off - asked the model to check it"})
             return self._result_text(result), False
+        value = None
         try:
-            if name == "create_chart":
-                if len(charts) >= MAX_CHARTS:
+            if name == "show_stat_cards":
+                value, is_error = self._stat_cards(args, charts)
+            elif name == "create_chart":
+                if self._chart_count(charts) >= MAX_CHARTS:
                     value: Any = {"error": f"at most {MAX_CHARTS} charts per answer"}
                     is_error = True
                 else:
@@ -315,6 +465,7 @@ class ChatAgent:
                         {"collection": args["collection"], "pipeline": args["pipeline"], "max_rows": 200},
                     )
                     value = self._mcp_value(result)
+                    _remember_numbers(value)
                     is_error = result.isError or (isinstance(value, dict) and "error" in value)
                     if not is_error and (not isinstance(value, dict) or "rows" not in value):
                         raise RuntimeError("MCP run_aggregate returned an unexpected result")
@@ -328,12 +479,13 @@ class ChatAgent:
             elif name in mcp_tool_names:
                 result = await session.call_tool(name, args)
                 value = self._mcp_value(result)
+                _remember_numbers(value)
                 is_error = result.isError or (isinstance(value, dict) and "error" in value)
                 if not is_error and not isinstance(value, dict):
                     raise RuntimeError(f"MCP tool {name} returned an unexpected result")
                 if not is_error and name == "chart_metric":
                     chart_data = value
-                    if len(charts) >= MAX_CHARTS:
+                    if self._chart_count(charts) >= MAX_CHARTS:
                         value = {"error": f"at most {MAX_CHARTS} charts per answer"}
                         is_error = True
                     elif not chart_data.get("rows") or not any(
@@ -357,6 +509,8 @@ class ChatAgent:
             content, is_error = f"{type(ex).__name__}: {ex}", True
             _log(f"{name} failed: {content}")
         steps.append({"tool": name, "input": args, "ok": not is_error})
+        _emit({"type": "step", "id": step_id, "state": "done", "ok": not is_error,
+               "summary": _step_summary(value, is_error, content)})
         return content, is_error
 
     @staticmethod
@@ -396,6 +550,7 @@ class ChatAgent:
                 request_args["max_completion_tokens"] = 8000
             else:
                 request_args.update(temperature=0, max_tokens=8000)
+            _emit({"type": "status", "text": "Reading the question" if turn == 0 else "Reading the results"})
             response = await asyncio.to_thread(self.client.chat.completions.create, **request_args)
             choice = response.choices[0]
             msg = choice.message
@@ -427,7 +582,8 @@ class ChatAgent:
         system = [{"type": "text", "text": SYSTEM_PROMPT}, {"type": "text", "text": date_context()}]
         mcp_tool_names = {tool.name for tool in mcp_tools}
         tool_specs = self._anthropic_tool_specs(mcp_tools)
-        for _ in range(MAX_TURNS):
+        for turn in range(MAX_TURNS):
+            _emit({"type": "status", "text": "Reading the question" if turn == 0 else "Reading the results"})
             response = await asyncio.to_thread(self._anthropic_response, system, messages, tool_specs)
 
             if response.stop_reason == "refusal":

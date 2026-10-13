@@ -368,6 +368,21 @@ async def chart_metric(
         return _err(ex)
 
 
+@mcp.tool()
+async def dashboard_kpis(days: int = 0) -> dict[str, Any]:
+    """Headline numbers exactly as the dashboard shows them: submissions (total and by source), files received,
+    runs (total and by status), completed / failed / validated runs, run success rate (%), average processing
+    time (s) and average confidence. With days > 0 also the previous period of the same length and the % change.
+    days: only data from the last N days (0 = all time, the default). Pass days only when the question names a period."""
+    try:
+        o = BiAnalytics(_db().database()).overview(max(0, int(days)))
+        return {"period": "all time" if not o["days"] else f"last {o['days']} days",
+                "from": o["from"], "to": o["to"], "current": o["current"],
+                "previous": o["previous"], "change_pct": o["change_pct"]}
+    except Exception as ex:
+        return _err(ex)
+
+
 if __name__ == "__main__":
     _log("starting (stdio)")
     try:

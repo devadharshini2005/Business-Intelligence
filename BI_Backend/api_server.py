@@ -23,6 +23,9 @@ Endpoints
 """
 from __future__ import annotations
 
+import asyncio
+import datetime as dt
+import json
 import os
 import sys
 from pathlib import Path
@@ -39,7 +42,7 @@ from fastapi.concurrency import run_in_threadpool  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
-from fastapi.responses import HTMLResponse  # noqa: E402
+from fastapi.responses import HTMLResponse, StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from bi_analytics import BiAnalytics  # noqa: E402
@@ -123,23 +126,27 @@ def _read(fn):
 
 
 @app.get("/api/overview")
-def overview(days: int = Query(30, ge=1, le=365)) -> dict:
-    return _read(lambda: _analytics().overview(days))
+def overview(days: int = Query(30, ge=0, le=3650), start: dt.date | None = None,
+             end: dt.date | None = None) -> dict:
+    return _read(lambda: _analytics().overview(days, start, end))
 
 
 @app.get("/api/trend")
-def trend(days: int = Query(30, ge=1, le=365)) -> dict:
-    return _read(lambda: _analytics().trend(days))
+def trend(days: int = Query(30, ge=0, le=3650), start: dt.date | None = None,
+          end: dt.date | None = None) -> dict:
+    return _read(lambda: _analytics().trend(days, start, end))
 
 
 @app.get("/api/processes")
-def processes(days: int = Query(30, ge=1, le=365)) -> list:
-    return _read(lambda: _analytics().processes(days))
+def processes(days: int = Query(30, ge=0, le=3650), start: dt.date | None = None,
+              end: dt.date | None = None) -> list:
+    return _read(lambda: _analytics().processes(days, start=start, end=end))
 
 
 @app.get("/api/node-hotspots")
-def node_hotspots(days: int = Query(30, ge=1, le=365)) -> list:
-    return _read(lambda: _analytics().node_hotspots(days))
+def node_hotspots(days: int = Query(30, ge=0, le=3650), start: dt.date | None = None,
+                  end: dt.date | None = None) -> list:
+    return _read(lambda: _analytics().node_hotspots(days, start=start, end=end))
 
 
 @app.get("/api/collections")
@@ -171,30 +178,67 @@ def dashboard(days: int = Query(30, ge=0, le=3650)) -> dict:
         raise HTTPException(503, f"Database unavailable: {type(ex).__name__}: {ex}") from ex
 
 
+def _chat_error(ex: Exception) -> HTTPException:
+    """Map a failure while answering to the status and message the UI shows."""
+    if isinstance(ex, (anthropic.AuthenticationError, openai.AuthenticationError)):
+        return HTTPException(500, "Model key rejected (401): check the API key and endpoint in BI_Backend/.env "
+                                  "- they must come from the same resource")
+    if isinstance(ex, (anthropic.NotFoundError, openai.NotFoundError)):
+        return HTTPException(500, "Model deployment not found (404): check AZURE_OPENAI_DEPLOYMENT / CHAT_MODEL "
+                                  "and the endpoint in BI_Backend/.env")
+    if isinstance(ex, (anthropic.RateLimitError, openai.RateLimitError)):
+        return HTTPException(429, "The assistant is busy (rate limited) - try again in a minute")
+    if isinstance(ex, (anthropic.APIConnectionError, openai.APIConnectionError)):
+        print(f"[actuvara-api] connection failed: {ex.__cause__ or ex}", file=sys.stderr, flush=True)
+        return HTTPException(502, "Could not reach the model endpoint - check the endpoint / resource name "
+                                  "in BI_Backend/.env")
+    if isinstance(ex, (anthropic.APIStatusError, openai.APIStatusError)):
+        print(f"[actuvara-api] model API error {ex.status_code}: {ex.message}", file=sys.stderr, flush=True)
+        return HTTPException(502, f"Model API error ({ex.status_code}): {str(ex.message)[:300]}")
+    print(f"[actuvara-api] chat failed: {type(ex).__name__}: {ex}", file=sys.stderr, flush=True)
+    return HTTPException(500, f"{type(ex).__name__}: {ex}")
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest) -> dict:
     if req.messages[-1].role != "user":
         raise HTTPException(400, "The last message must be the user's question")
     try:
         return await run_in_threadpool(_chat().answer, [m.model_dump() for m in req.messages])
-    except (anthropic.AuthenticationError, openai.AuthenticationError) as ex:
-        raise HTTPException(500, "Model key rejected (401): check the API key and endpoint in BI_Backend/.env "
-                                 "- they must come from the same resource") from ex
-    except (anthropic.NotFoundError, openai.NotFoundError) as ex:
-        raise HTTPException(500, "Model deployment not found (404): check AZURE_OPENAI_DEPLOYMENT / CHAT_MODEL "
-                                 "and the endpoint in BI_Backend/.env") from ex
-    except (anthropic.RateLimitError, openai.RateLimitError) as ex:
-        raise HTTPException(429, "The assistant is busy (rate limited) - try again in a minute") from ex
-    except (anthropic.APIConnectionError, openai.APIConnectionError) as ex:
-        print(f"[actuvara-api] connection failed: {ex.__cause__ or ex}", file=sys.stderr, flush=True)
-        raise HTTPException(502, "Could not reach the model endpoint - check the endpoint / resource name "
-                                 "in BI_Backend/.env") from ex
-    except (anthropic.APIStatusError, openai.APIStatusError) as ex:
-        print(f"[actuvara-api] model API error {ex.status_code}: {ex.message}", file=sys.stderr, flush=True)
-        raise HTTPException(502, f"Model API error ({ex.status_code}): {str(ex.message)[:300]}") from ex
     except Exception as ex:
-        print(f"[actuvara-api] chat failed: {type(ex).__name__}: {ex}", file=sys.stderr, flush=True)
-        raise HTTPException(500, f"{type(ex).__name__}: {ex}") from ex
+        raise _chat_error(ex) from ex
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(req: ChatRequest) -> StreamingResponse:
+    """Same answer as /api/chat, streamed as NDJSON: progress events (see ChatAgent.answer) while the agent
+    works, then {"type": "result", "answer", "charts", "steps"} or {"type": "error", "status", "detail"}."""
+    if req.messages[-1].role != "user":
+        raise HTTPException(400, "The last message must be the user's question")
+    history = [m.model_dump() for m in req.messages]
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    def emit(event: dict | None) -> None:  # called from the worker thread
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    def work() -> None:
+        try:
+            emit({"type": "result", **_chat().answer(history, emit)})
+        except Exception as ex:
+            err = _chat_error(ex)
+            emit({"type": "error", "status": err.status_code, "detail": err.detail})
+        finally:
+            emit(None)
+
+    async def events():
+        task = asyncio.ensure_future(run_in_threadpool(work))
+        while (event := await queue.get()) is not None:
+            yield json.dumps(event, default=str, ensure_ascii=False) + "\n"
+        await task
+
+    return StreamingResponse(events(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # --- Angular frontend ---------------------------------------------------------------
