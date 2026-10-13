@@ -7,12 +7,10 @@ import {
   ChartSpec,
   ChatMessage,
   ChatResponse,
-  CollectionRow,
   DashboardData,
   Envelope,
   Health,
   McpInfo,
-  SchemaField,
   Submission,
   SubmissionRow,
   ToolStep,
@@ -61,14 +59,6 @@ export class ApiService {
 
   submission(id: string): Observable<Submission> {
     return this.get('idp_get_submission', `/api/submissions/${encodeURIComponent(id)}`);
-  }
-
-  collections(): Observable<Envelope<CollectionRow>> {
-    return this.get('list_collections', '/api/collections');
-  }
-
-  schema(collection: string): Observable<Envelope<SchemaField>> {
-    return this.get('infer_collection_schema', `/api/collections/${encodeURIComponent(collection)}/schema`);
   }
 
   /** GET an endpoint and log which MCP tool answered it, how long it took and whether it worked. */

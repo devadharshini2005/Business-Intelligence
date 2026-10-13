@@ -69,7 +69,7 @@ export class DashboardPage {
 
   askChat(q: string): void {
     if (!q.trim()) return;
-    this.chat.ask(q);
+    this.chat.ask(q, { fresh: true });
     this.openSubmission.set(null);
     this.router.navigateByUrl('/chat');
   }

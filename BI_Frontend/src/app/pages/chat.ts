@@ -1,11 +1,14 @@
-import { AfterViewChecked, Component, ElementRef, inject, signal, viewChild } from '@angular/core';
+import { AfterViewChecked, Component, ElementRef, computed, effect, inject, signal, untracked, viewChild } from '@angular/core';
 import { DatePipe, JsonPipe } from '@angular/common';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
+import { map } from 'rxjs';
 import { marked } from 'marked';
 
 import { ChatStore } from '../core/chat.store';
-import { ToolStep } from '../core/models';
-import { ChartCard } from '../shared/chart-card';
+import { Conversation, ToolStep } from '../core/models';
+import { AnswerAnalytics } from '../shared/answer-analytics';
 
 const SUGGESTIONS: { group: string; questions: string[] }[] = [
   {
@@ -46,14 +49,14 @@ function describe(s: ToolStep): string {
     case 'idp_find_submissions': return 'Searched submissions';
     case 'idp_get_submission': return `Opened submission ${i['submission_id'] ?? ''}`;
     case 'idp_get_run_details': return `Opened run ${i['run_id'] ?? ''}`;
-    case 'create_chart': return `Built the chart "${i['title'] ?? ''}"`;
+    case 'build_chart': return `Built the chart "${i['title'] ?? ''}"`;
     default: return s.tool;
   }
 }
 
 @Component({
   selector: 'app-chat',
-  imports: [FormsModule, ChartCard, JsonPipe, DatePipe],
+  imports: [FormsModule, AnswerAnalytics, JsonPipe, DatePipe, RouterLink],
   templateUrl: './chat.html',
   styleUrl: './chat.scss',
 })
@@ -66,11 +69,105 @@ export class ChatPage implements AfterViewChecked {
   readonly describe = describe;
   private lastSize = '';
   private readonly mdCache = new Map<string, string>();
+  private readonly router = inject(Router);
+
+  /** The conversation id in the address bar (/chat/:id), so back/forward and bookmarks work. */
+  private readonly routeId = toSignal(inject(ActivatedRoute).paramMap.pipe(map((p) => p.get('id'))));
+
+  // --- history sidebar ---------------------------------------------------------------------------
+  readonly sidebarOpen = signal(readSidebar());
+  readonly search = signal('');
+  readonly editingId = signal<string | null>(null);
+
+  /** History grouped like a chat app: Today, Yesterday, Previous 7 days, Previous 30 days, then by month. */
+  readonly groups = computed(() => {
+    const q = this.search().trim().toLowerCase();
+    const list = this.store
+      .history()
+      .filter((c) => !q || c.title.toLowerCase().includes(q) ||
+        c.messages.some((m) => m.role === 'user' && m.content.toLowerCase().includes(q)));
+    const groups: { label: string; items: Conversation[] }[] = [];
+    for (const c of list) {
+      const label = groupLabel(c.updatedAt);
+      const g = groups.find((x) => x.label === label);
+      if (g) g.items.push(c);
+      else groups.push({ label, items: [c] });
+    }
+    return groups;
+  });
+
+  constructor() {
+    // Address bar -> open conversation. A bare /chat resumes the conversation already open.
+    effect(() => {
+      const id = this.routeId();
+      untracked(() => {
+        if (id) {
+          if (!this.store.open(id)) this.go(null);
+        } else if (this.store.activeId()) {
+          this.go(this.store.activeId());
+        }
+      });
+    });
+  }
 
   send(text: string): void {
     if (!text.trim() || this.store.busy()) return;
     this.store.ask(text);
     this.draft.set('');
+    // A first question creates the conversation: give it its own address.
+    if (this.store.activeId() !== this.routeId()) this.go(this.store.activeId());
+  }
+
+  newChat(): void {
+    this.store.newChat();
+    this.draft.set('');
+    this.router.navigate(['/chat']);
+    if (window.innerWidth < 900) this.sidebarOpen.set(false);
+  }
+
+  opened(): void {
+    if (window.innerWidth < 900) this.sidebarOpen.set(false);
+  }
+
+  toggleSidebar(): void {
+    this.sidebarOpen.update((v) => !v);
+    try {
+      localStorage.setItem('bi.chat.sidebar', String(this.sidebarOpen()));
+    } catch {
+      /* not remembered */
+    }
+  }
+
+  startRename(c: Conversation, e: Event): void {
+    e.preventDefault();
+    e.stopPropagation();
+    this.editingId.set(c.id);
+    setTimeout(() => document.querySelector<HTMLInputElement>('.history .rename')?.select());
+  }
+
+  finishRename(c: Conversation, value: string): void {
+    if (this.editingId() !== c.id) return;
+    this.store.rename(c.id, value);
+    this.editingId.set(null);
+  }
+
+  remove(c: Conversation, e: Event): void {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!confirm(`Delete "${c.title}"? This can't be undone.`)) return;
+    const wasOpen = this.store.activeId() === c.id;
+    this.store.remove(c.id);
+    if (wasOpen) this.go(null);
+  }
+
+  clearHistory(): void {
+    if (!confirm("Delete every conversation in this browser? This can't be undone.")) return;
+    this.store.clearAll();
+    this.go(null);
+  }
+
+  private go(id: string | null): void {
+    this.router.navigate(id ? ['/chat', id] : ['/chat'], { replaceUrl: true });
   }
 
   onEnter(e: Event): void {
@@ -109,4 +206,26 @@ export class ChatPage implements AfterViewChecked {
       el?.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
     }
   }
+}
+
+function readSidebar(): boolean {
+  try {
+    const v = localStorage.getItem('bi.chat.sidebar');
+    if (v !== null) return v === 'true';
+  } catch {
+    /* fall through */
+  }
+  return window.innerWidth >= 900;
+}
+
+function groupLabel(iso: string): string {
+  const d = new Date(iso);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.floor((today.getTime() - new Date(d).setHours(0, 0, 0, 0)) / 86_400_000);
+  if (days <= 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return 'Previous 7 days';
+  if (days < 30) return 'Previous 30 days';
+  return d.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 }

@@ -1,9 +1,10 @@
 @if (expanded()) {
   <div class="backdrop" (click)="toggleExpanded()"></div>
 }
-<section class="card" [class.kpi]="spec().type === 'kpi'" [class.expanded]="expanded()">
+<section class="card" [class.kpi]="spec().type === 'kpi'" [class.hero]="hero()" [class.expanded]="expanded()">
   <header>
     <div class="titles">
+      @if (kind(); as k) { <span class="kind" [attr.data-kind]="k">{{ k }}</span> }
       <h3 [title]="spec().title">{{ spec().title }}</h3>
       @if (source() && spec().type !== 'kpi') { <p class="src">MCP · {{ source() }}</p> }
     </div>
@@ -64,12 +65,24 @@
     </div>
   </header>
 
+  @if (spec().insight && spec().type !== 'kpi') {
+    <p class="insight">{{ spec().insight }}</p>
+  }
+  @if (facts().length && !showTable()) {
+    <dl class="facts">
+      @for (f of facts(); track f.label) {
+        <div><dt>{{ f.label }}</dt><dd class="num" [title]="f.value">{{ f.value }}</dd></div>
+      }
+    </dl>
+  }
+
   @switch (spec().type) {
     @case ('kpi') {
       <div class="kpi-value" [class.critical]="spec().status === 'critical'">
         @if (spec().value === null || spec().value === undefined) { — }
         @else { {{ spec().value | number: '1.0-1' }}<span class="unit">{{ spec().unit }}</span> }
       </div>
+      @if (spec().insight) { <p class="kpi-insight">{{ spec().insight }}</p> }
     }
     @case ('error') {
       <p class="error">Couldn't load: {{ spec().error }}</p>

@@ -21,6 +21,10 @@ export interface ChartSpec {
   status?: 'critical' | 'warning' | 'good' | null;
   status_colors?: boolean;
   error?: string;
+  /** One-sentence takeaway written by the assistant (build_chart insight). */
+  insight?: string;
+  /** Label to emphasise; the other bars are muted. */
+  highlight?: string;
 }
 
 export interface DashboardData {
@@ -54,6 +58,16 @@ export interface ChatMessage {
   pending?: boolean;
   error?: boolean;
   at?: string;
+}
+
+/** One conversation in the chat history (saved in this browser). */
+export interface Conversation {
+  id: string;
+  /** The first question, shortened; can be renamed. */
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: ChatMessage[];
 }
 
 export interface Health {
@@ -124,25 +138,6 @@ export interface Envelope<T> {
   truncated: boolean;
   total_found?: number;
   note?: string;
-}
-
-/** /api/collections - MCP list_collections. */
-export interface CollectionRow {
-  collection: string;
-  type: string;
-  approx_documents: number | null;
-  view_on?: string | null;
-  capped?: boolean;
-  has_validator?: boolean;
-}
-
-/** /api/collections/{c}/schema - MCP infer_collection_schema. */
-export interface SchemaField {
-  field: string;
-  types: string;
-  present_in: number;
-  sampled_docs: number;
-  presence_pct: number;
 }
 
 /** /api/mcp - the MCP server behind every number on screen. */

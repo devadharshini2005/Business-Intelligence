@@ -350,3 +350,82 @@ tr.clickable {
   font-size: 13px;
   margin: 0;
 }
+
+/* --- chat annotations: kind chip, takeaway, quick facts ---------------------- */
+.kind {
+  display: inline-block;
+  margin-bottom: 4px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 17px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--accent) 11%, transparent);
+  color: var(--accent);
+
+  &[data-kind='Ranking'] {
+    background: color-mix(in srgb, var(--series-2) 13%, transparent);
+    color: var(--series-2);
+  }
+  &[data-kind='Share'] {
+    background: color-mix(in srgb, var(--series-3) 14%, transparent);
+    color: var(--series-3);
+  }
+  &[data-kind='Comparison'] {
+    background: color-mix(in srgb, var(--series-7) 13%, transparent);
+    color: var(--series-7);
+  }
+  &[data-kind='Details'] {
+    background: var(--surface-2);
+    color: var(--text-secondary);
+  }
+}
+
+.insight {
+  margin: -4px 0 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  margin: 0;
+
+  div {
+    min-width: 0;
+  }
+  dt {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  dd {
+    margin: 1px 0 0;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+}
+
+.kpi-insight {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.card.hero {
+  border-color: var(--border-strong);
+}

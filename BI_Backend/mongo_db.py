@@ -25,16 +25,20 @@ import datetime as dt
 import json
 import os
 import warnings
+import time
 from typing import Any
 
 from bson import Binary, Decimal128, ObjectId, json_util
+import pymongo
 from pymongo import MongoClient
 from pymongo.uri_parser import parse_uri
 
-from query_guard import parse_filter, parse_pipeline, parse_projection, parse_sort
+from query_guard import check_field_names, check_stages, parse_filter, parse_pipeline, parse_projection, parse_sort
 
 MAX_SAMPLE = 1000
 MAX_ROWS = 1000
+COUNT_TIMEOUT_S = 5  # list_collections: cap per document count ...
+COUNT_BUDGET_S = 20  # ... and for all of them together
 RELATIONSHIP_SAMPLE = 50
 
 
@@ -183,15 +187,31 @@ class MongoMetadataClient:
         return [{"database": name} for name in sorted(self._client.list_database_names())]
 
     def list_collections(self, database: str | None = None) -> list[dict[str, Any]]:
-        rows = []
         db = self._db(database)
-        for c in db.list_collections():
+        infos = list(db.list_collections())
+
+        # Estimated counts, one after another on the open connection (parallel calls each open a new
+        # connection, and logging in to Cosmos DB takes seconds). Each count and the whole pass are capped,
+        # so a slow collection shows "unknown" instead of stalling the server.
+        deadline = time.monotonic() + COUNT_BUDGET_S
+        counts: list[int | None] = []
+        for c in infos:
+            left = deadline - time.monotonic()
+            if c.get("type", "collection") != "collection" or left <= 0:
+                counts.append(None)
+                continue
+            try:
+                with pymongo.timeout(min(COUNT_TIMEOUT_S, left)):
+                    counts.append(db[c["name"]].estimated_document_count())
+            except Exception:
+                counts.append(None)
+        rows = []
+        for c, n in zip(infos, counts):
             options = c.get("options", {})
-            is_coll = c.get("type", "collection") == "collection"
             rows.append({
                 "collection": c["name"],
                 "type": c.get("type", "collection"),
-                "approx_documents": db[c["name"]].estimated_document_count() if is_coll else None,
+                "approx_documents": n,
                 "view_on": options.get("viewOn"),
                 "capped": options.get("capped", False),
                 "has_validator": "validator" in options,
@@ -363,6 +383,7 @@ class MongoMetadataClient:
     def count_documents(self, collection: str, database: str | None = None, filter_json: str = "") -> dict[str, Any]:
         """Documents in a collection, optionally matching a JSON filter."""
         flt = parse_filter(filter_json)
+        check_field_names(collection, flt)
         return {"collection": collection, "filter": _to_json(flt),
                 "document_count": self._coll(collection, database).count_documents(flt)}
 
@@ -383,6 +404,7 @@ class MongoMetadataClient:
         path = (field_path or "").replace("[]", "")
         if not path or any(not seg or seg.startswith("$") for seg in path.split(".")):
             raise ValueError("field_path must be a dotted field name (e.g. 'status' or 'address.city')")
+        check_field_names(collection, {}, [path.split(".")[0]])
         pipeline = [
             {"$match": {path: {"$exists": True}}},
             {"$group": {"_id": f"${path}", "count": {"$sum": 1}}},
@@ -402,10 +424,12 @@ class MongoMetadataClient:
         max_rows: int = 100,
     ) -> list[dict[str, Any]]:
         """One read-only find(). All arguments are JSON checked by query_guard."""
+        flt, projection, sort = parse_filter(filter_json), parse_projection(projection_json), parse_sort(sort_json)
+        check_field_names(collection, [flt, projection or {}, dict(sort or [])])
         cursor = self._coll(collection, database).find(
-            parse_filter(filter_json),
-            projection=parse_projection(projection_json),
-            sort=parse_sort(sort_json),
+            flt,
+            projection=projection,
+            sort=sort,
             limit=_cap(max_rows, MAX_ROWS),
         )
         return _to_json(list(cursor))
@@ -416,6 +440,8 @@ class MongoMetadataClient:
         """One read-only aggregation. Rejected if it contains a write stage
         ($out/$merge) or server-side JavaScript; a $limit is always appended."""
         pipeline = parse_pipeline(pipeline_json)
+        check_stages(pipeline)
+        check_field_names(collection, pipeline)
         pipeline.append({"$limit": _cap(max_rows, MAX_ROWS)})
         rows = _to_json(list(self._coll(collection, database).aggregate(pipeline)))
         return [r if isinstance(r, dict) else {"value": r} for r in rows]

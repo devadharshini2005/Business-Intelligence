@@ -58,10 +58,11 @@ app.add_middleware(CORSMiddleware, allow_methods=["GET", "POST"], allow_headers=
 
 
 async def mcp_tool(name: str, args: dict[str, Any], not_found: bool = False) -> Any:
-    """Call an MCP tool for an endpoint; a tool error becomes 404 (lookups) or 503."""
+    """Call an MCP tool for an endpoint; a tool error becomes 404 (lookups), 504 (timed out) or 503."""
     data, error = await call_tool(app.state.mcp, name, args)
     if error:
-        raise HTTPException(404 if not_found and "found" in str(data) else 503, f"{name}: {data}")
+        status = 404 if not_found and "found" in str(data) else 504 if "timed out" in str(data) else 503
+        raise HTTPException(status, f"{name}: {data}")
     return data
 
 

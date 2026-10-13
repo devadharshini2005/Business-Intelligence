@@ -1,10 +1,78 @@
+@if (sidebarOpen()) {
+  <div class="scrim" (click)="toggleSidebar()"></div>
+  <aside class="history" aria-label="Chat history">
+    <div class="history-top">
+      <button class="primary new-chat" type="button" (click)="newChat()">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+        New chat
+      </button>
+      <button class="ghost bare icon-btn" type="button" (click)="toggleSidebar()" aria-label="Hide history" title="Hide history">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></svg>
+      </button>
+    </div>
+
+    <label class="search">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+      <input type="search" placeholder="Search chats" aria-label="Search chats"
+             [ngModel]="search()" (ngModelChange)="search.set($event)" />
+    </label>
+
+    <nav class="list">
+      @for (g of groups(); track g.label) {
+        <h3>{{ g.label }}</h3>
+        @for (c of g.items; track c.id) {
+          @if (editingId() === c.id) {
+            <input #name class="rename" [value]="c.title" aria-label="Chat name"
+                   (keydown.enter)="finishRename(c, name.value)" (keydown.escape)="editingId.set(null)"
+                   (blur)="finishRename(c, name.value)" />
+          } @else {
+            <a class="item" [routerLink]="['/chat', c.id]" [class.active]="store.activeId() === c.id"
+               (click)="opened()" [title]="c.title">
+              @if (store.busyId() === c.id) { <span class="live" title="Answering…"></span> }
+              <span class="name">{{ c.title }}</span>
+              <span class="item-actions">
+                <button type="button" (click)="startRename(c, $event)" aria-label="Rename" title="Rename">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16zM14 6l4 4" /></svg>
+                </button>
+                <button type="button" (click)="remove(c, $event)" aria-label="Delete" title="Delete">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" /></svg>
+                </button>
+              </span>
+            </a>
+          }
+        }
+      } @empty {
+        <p class="empty">{{ search() ? 'No chats match.' : 'Your conversations will appear here.' }}</p>
+      }
+    </nav>
+
+    @if (store.conversations().length) {
+      <div class="history-foot">
+        <span>{{ store.conversations().length }} {{ store.conversations().length === 1 ? 'chat' : 'chats' }} · saved in this browser</span>
+        <button type="button" class="link" (click)="clearHistory()">Clear all</button>
+      </div>
+    }
+  </aside>
+}
+
+<section class="conversation">
 <div class="page-head">
-  <div>
-    <h1>Ask the data</h1>
-    <p class="sub">Answers come from the Intellidoc database, with charts built from the same queries.</p>
+  <div class="head-title">
+    @if (!sidebarOpen()) {
+      <button class="ghost bare icon-btn" type="button" (click)="toggleSidebar()" aria-label="Show history" title="Show history">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></svg>
+      </button>
+    }
+    <div>
+      <h1>{{ store.active()?.title ?? 'Ask the data' }}</h1>
+      <p class="sub">Answers come from the Intellidoc database, with charts built from the same queries.</p>
+    </div>
   </div>
   @if (store.messages().length) {
-    <button class="ghost" type="button" (click)="store.clear()" [disabled]="store.busy()">New chat</button>
+    <button class="ghost" type="button" (click)="newChat()">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+      New chat
+    </button>
   }
 </div>
 
@@ -12,9 +80,7 @@
   @if (!store.messages().length) {
     <div class="welcome">
       <div class="hero">
-        <div class="hero-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.7L18.5 9.5 13.8 11.3 12 16l-1.8-4.7L5.5 9.5l4.7-1.8z" /><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" /></svg>
-        </div>
+        <img class="app-logo hero-logo" src="Application_logo.png" alt="" width="64" height="64" />
         <h2>What would you like to know?</h2>
         <p>Ask in plain English. You'll get a written answer plus charts built from your data.</p>
       </div>
@@ -38,7 +104,7 @@
       </div>
     } @else {
       <div class="msg assistant" [class.error]="m.error">
-        <div class="avatar" aria-hidden="true">AI</div>
+        <img class="app-logo avatar" src="Application_logo.png" alt="" width="30" height="30" />
         <div class="body">
           @if (m.pending) {
             <div class="progress" aria-live="polite">
@@ -58,11 +124,7 @@
           }
 
           @if (m.charts?.length) {
-            <div class="charts" [class.single]="m.charts!.length === 1">
-              @for (c of m.charts!; track $index) {
-                <app-chart-card [spec]="c" [class.wide]="c.type === 'table' || c.type === 'line'" />
-              }
-            </div>
+            <app-answer-analytics [charts]="m.charts!" />
           }
 
           @if (!m.pending) {
@@ -106,10 +168,12 @@
   <textarea name="q" rows="1" placeholder="Ask a question about your data…"
             [ngModel]="draft()" (ngModelChange)="draft.set($event)" (keydown.enter)="onEnter($event)"
             aria-label="Question"></textarea>
-  @if (store.busy()) {
+  @if (store.busyId() && store.busyId() === store.activeId()) {
     <button type="button" class="ghost stop" (click)="store.stop()">Stop</button>
   } @else {
-    <button type="submit" class="primary" [disabled]="!draft().trim()">Send</button>
+    <button type="submit" class="primary" [disabled]="!draft().trim() || store.busy()"
+            [title]="store.busy() ? 'Another chat is still being answered' : ''">Send</button>
   }
 </form>
 <p class="disclaimer">Read-only: the assistant can't change data. Check important figures with the queries under each answer.</p>
+</section>

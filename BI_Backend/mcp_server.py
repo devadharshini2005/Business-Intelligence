@@ -9,9 +9,12 @@ Run:  python mcp_server.py
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -39,14 +42,18 @@ def _log(msg: str) -> None:
 
 
 _client: MongoMetadataClient | None = None
+_client_lock = threading.Lock()
 
 
 def _db() -> MongoMetadataClient:
     """Create the MongoDB client on first use, so the server still starts (and
-    reports a clear error) when the connection string isn't filled in yet."""
+    reports a clear error) when the connection string isn't filled in yet.
+    Tools run on worker threads, so creation is locked; the pymongo client itself is thread-safe."""
     global _client
     if _client is None:
-        _client = MongoMetadataClient()
+        with _client_lock:
+            if _client is None:
+                _client = MongoMetadataClient()
     return _client
 
 
@@ -111,9 +118,23 @@ mcp = FastMCP(
 )
 
 
+
+def tool(fn):
+    """Register a tool that runs on a worker thread.
+
+    pymongo is blocking: called straight from the event loop, one slow query would stall every other
+    request (the dashboard, the chatbot and Copilot all share this server). The MCP SDK already handles
+    each request as its own task, so moving the database work to a thread lets requests run side by side.
+    functools.wraps keeps the signature and docstring FastMCP builds the tool's schema from."""
+    @functools.wraps(fn)
+    async def run(*args: Any, **kwargs: Any) -> Any:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return mcp.tool()(run)
+
+
 # --- connectivity ------------------------------------------------------------
-@mcp.tool()
-async def ping_db() -> dict[str, Any]:
+@tool
+def ping_db() -> dict[str, Any]:
     """Check that the MongoDB cluster is reachable with the configured credentials."""
     try:
         return {"connected": _db().ping()}
@@ -121,8 +142,8 @@ async def ping_db() -> dict[str, Any]:
         return {"connected": False, **_err(ex)}
 
 
-@mcp.tool()
-async def server_info() -> dict[str, Any]:
+@tool
+def server_info() -> dict[str, Any]:
     """Cluster hosts, default database and server version."""
     try:
         return _db().server_info()
@@ -131,8 +152,8 @@ async def server_info() -> dict[str, Any]:
 
 
 # --- discovery ---------------------------------------------------------------
-@mcp.tool()
-async def list_databases() -> dict[str, Any]:
+@tool
+def list_databases() -> dict[str, Any]:
     """List the databases on the cluster."""
     try:
         return _envelope(_db().list_databases())
@@ -140,8 +161,8 @@ async def list_databases() -> dict[str, Any]:
         return _err(ex)
 
 
-@mcp.tool()
-async def list_collections(database: str = "") -> dict[str, Any]:
+@tool
+def list_collections(database: str = "") -> dict[str, Any]:
     """List collections and views (MongoDB's equivalent of tables)."""
     try:
         return _envelope(_db().list_collections(database or None))
@@ -149,8 +170,8 @@ async def list_collections(database: str = "") -> dict[str, Any]:
         return _err(ex)
 
 
-@mcp.tool()
-async def find_collections_like(name_pattern: str, database: str = "") -> dict[str, Any]:
+@tool
+def find_collections_like(name_pattern: str, database: str = "") -> dict[str, Any]:
     """Find collections whose name contains a pattern (case-insensitive)."""
     try:
         return _envelope(_db().find_collections_like(name_pattern, database or None))
@@ -158,8 +179,8 @@ async def find_collections_like(name_pattern: str, database: str = "") -> dict[s
         return _err(ex)
 
 
-@mcp.tool()
-async def collection_exists(collection: str, database: str = "") -> dict[str, Any]:
+@tool
+def collection_exists(collection: str, database: str = "") -> dict[str, Any]:
     """Check whether an exact collection name exists (empty rows = it doesn't)."""
     try:
         return _envelope(_db().collection_exists(collection, database or None))
@@ -167,8 +188,8 @@ async def collection_exists(collection: str, database: str = "") -> dict[str, An
         return _err(ex)
 
 
-@mcp.tool()
-async def get_collection_details(collection: str, database: str = "") -> dict[str, Any]:
+@tool
+def get_collection_details(collection: str, database: str = "") -> dict[str, Any]:
     """Options (validator, capped, view definition), indexes and size stats of a collection."""
     try:
         return _db().get_collection_details(collection, database or None)
@@ -176,8 +197,8 @@ async def get_collection_details(collection: str, database: str = "") -> dict[st
         return _err(ex)
 
 
-@mcp.tool()
-async def list_indexes(collection: str, database: str = "") -> dict[str, Any]:
+@tool
+def list_indexes(collection: str, database: str = "") -> dict[str, Any]:
     """Indexes on a collection: keys, uniqueness and other options."""
     try:
         return _envelope(_db().list_indexes(collection, database or None))
@@ -186,8 +207,8 @@ async def list_indexes(collection: str, database: str = "") -> dict[str, Any]:
 
 
 # --- inferred schema & relationships -----------------------------------------
-@mcp.tool()
-async def infer_collection_schema(collection: str, database: str = "", sample_size: int = 100) -> dict[str, Any]:
+@tool
+def infer_collection_schema(collection: str, database: str = "", sample_size: int = 100) -> dict[str, Any]:
     """Field paths and types found in a random sample of documents, with how
     often each field appears. Use run_find to read the values."""
     try:
@@ -196,8 +217,8 @@ async def infer_collection_schema(collection: str, database: str = "", sample_si
         return _err(ex)
 
 
-@mcp.tool()
-async def find_fields_like(field_pattern: str, database: str = "", sample_size: int = 50) -> dict[str, Any]:
+@tool
+def find_fields_like(field_pattern: str, database: str = "", sample_size: int = 50) -> dict[str, Any]:
     """Find which collections have a field whose name contains a pattern
     (where a data point lives). Samples every collection, so it's slower."""
     try:
@@ -206,8 +227,8 @@ async def find_fields_like(field_pattern: str, database: str = "", sample_size: 
         return _err(ex)
 
 
-@mcp.tool()
-async def field_exists(collection: str, field_path: str, database: str = "") -> dict[str, Any]:
+@tool
+def field_exists(collection: str, field_path: str, database: str = "") -> dict[str, Any]:
     """Exact check over the whole collection: how many documents have this
     field (dotted path, e.g. 'address.city')."""
     try:
@@ -216,8 +237,8 @@ async def field_exists(collection: str, field_path: str, database: str = "") -> 
         return _err(ex)
 
 
-@mcp.tool()
-async def get_inferred_relationships(collection: str = "", database: str = "", verify: bool = True) -> dict[str, Any]:
+@tool
+def get_inferred_relationships(collection: str = "", database: str = "", verify: bool = True) -> dict[str, Any]:
     """Likely links between collections, guessed from '<name>Id' fields. With
     verify=True each link is checked on a sample and reported as a match %
     (only the percentage is returned). Leave `collection` empty to scan all."""
@@ -228,8 +249,8 @@ async def get_inferred_relationships(collection: str = "", database: str = "", v
 
 
 # --- read-only data access -----------------------------------------------------
-@mcp.tool()
-async def count_documents(collection: str, filter: Json = "", database: str = "") -> dict[str, Any]:
+@tool
+def count_documents(collection: str, filter: Json = "", database: str = "") -> dict[str, Any]:
     """Number of documents in a collection, optionally matching a JSON filter
     (e.g. '{"status": "open"}')."""
     try:
@@ -238,8 +259,8 @@ async def count_documents(collection: str, filter: Json = "", database: str = ""
         return _err(ex)
 
 
-@mcp.tool()
-async def get_distinct_values(collection: str, field_path: str, database: str = "", limit: int = 100) -> dict[str, Any]:
+@tool
+def get_distinct_values(collection: str, field_path: str, database: str = "", limit: int = 100) -> dict[str, Any]:
     """Distinct values of one field with how many documents have each -
     useful for status/type/category fields."""
     try:
@@ -248,8 +269,8 @@ async def get_distinct_values(collection: str, field_path: str, database: str = 
         return _err(ex)
 
 
-@mcp.tool()
-async def run_find(
+@tool
+def run_find(
     collection: str, filter: Json = "", projection: Json = "", sort: Json = "", database: str = "", max_rows: int = 100
 ) -> dict[str, Any]:
     """Read documents with one find() (the SELECT of MongoDB). Arguments are
@@ -261,8 +282,8 @@ async def run_find(
         return _err(ex)
 
 
-@mcp.tool()
-async def run_aggregate(collection: str, pipeline: Json, database: str = "", max_rows: int = 100) -> dict[str, Any]:
+@tool
+def run_aggregate(collection: str, pipeline: Json, database: str = "", max_rows: int = 100) -> dict[str, Any]:
     """Run one read-only aggregation pipeline given as a JSON array, e.g.
     '[{"$match": {"status": "open"}}, {"$group": {"_id": "$type", "n": {"$sum": 1}}}]'.
     Rejected if it contains $out, $merge or server-side JavaScript."""
@@ -273,8 +294,8 @@ async def run_aggregate(collection: str, pipeline: Json, database: str = "", max
 
 
 # --- IDP submission flow (intellidoc-specific) -----------------------------------
-@mcp.tool()
-async def idp_find_submissions(
+@tool
+def idp_find_submissions(
     source: str = "", status: str = "", search: str = "", days: int = 0, limit: int = 20
 ) -> dict[str, Any]:
     """List IDP submissions, newest first, across email triggers, webhook
@@ -289,8 +310,8 @@ async def idp_find_submissions(
         return _err(ex)
 
 
-@mcp.tool()
-async def idp_get_submission(submission_id: str, include_nodes: bool = False) -> dict[str, Any]:
+@tool
+def idp_get_submission(submission_id: str, include_nodes: bool = False) -> dict[str, Any]:
     """Everything about one submission in one call: its details, every file,
     and for each file its runs (extraction results) with process name, status,
     node progress (e.g. 9/11 completed), the current step and the nodes that
@@ -302,8 +323,8 @@ async def idp_get_submission(submission_id: str, include_nodes: bool = False) ->
         return _err(ex)
 
 
-@mcp.tool()
-async def idp_get_run_details(
+@tool
+def idp_get_run_details(
     run_id: str, include_extracted_data: bool = False, include_node_outputs: bool = False
 ) -> dict[str, Any]:
     """Expand one run (extraction_results id): every workflow node in order
@@ -318,8 +339,8 @@ async def idp_get_run_details(
 
 
 # --- analytics -------------------------------------------------------------------
-@mcp.tool()
-async def find_id(id: str, database: str = "") -> dict[str, Any]:
+@tool
+def find_id(id: str, database: str = "") -> dict[str, Any]:
     """Which collection(s) hold a document with this _id - use it when you don't know what an id is."""
     try:
         return _envelope(_db().find_id(id, database or None))
@@ -327,30 +348,37 @@ async def find_id(id: str, database: str = "") -> dict[str, Any]:
         return _err(ex)
 
 
-@mcp.tool()
-async def build_chart(
+@tool
+def build_chart(
     title: str, chart_type: str, collection: str, pipeline: Json, x_field: str, y_fields: list[str],
     series_names: list[str] | None = None, unit: str = "", series_field: str = "", missing_value: str = "zero",
-    database: str = "",
+    database: str = "", insight: str = "", highlight: str = "",
 ) -> dict[str, Any]:
     """Chart spec(s) built from one read-only aggregation, so every number in the chart comes from the data.
     chart_type: bar | hbar | line | pie | doughnut | kpi | table. Each output row is one point: x_field is the
     label (category or date string), y_fields the values (one series each). For one line/bar per category, return
     long rows (e.g. {day, source, n}) and pass series_field="source". Days missing from a daily axis count as 0
-    (missing_value="gap" for averages/rates). For kpi, the first row's y_fields[0] is the value."""
+    (missing_value="gap" for averages/rates). For kpi, the first row's y_fields[0] is the value.
+    insight: one plain-language sentence saying what the chart shows (shown under its title), e.g. "Email
+    brings in most submissions". highlight: a label to emphasise (e.g. the top process); the others are muted."""
     try:
         rows = _db().run_aggregate(collection, _j(pipeline), database or None, 1000)
         if not rows:
             return {"charts": [], "row_count": 0, "note": "No rows - check field names, filters and date types."}
         spec = from_rows(title, chart_type, rows, x_field, y_fields, series_names, unit, series_field, missing_value)
         specs = [spec] if series_field else split_mixed_scales(spec)  # different measures get their own chart
-        return {"charts": [as_percent(s) for s in specs], "row_count": len(rows), "rows": rows[:50]}
+        specs = [as_percent(s) for s in specs]
+        if insight.strip():
+            specs[0]["insight"] = insight.strip()[:200]
+        if highlight.strip() and highlight.strip() in (specs[0].get("labels") or []):
+            specs[0]["highlight"] = highlight.strip()
+        return {"charts": specs, "row_count": len(rows), "rows": rows[:50]}
     except Exception as ex:
         return _err(ex)
 
 
-@mcp.tool()
-async def get_dashboard(days: int = 30) -> dict[str, Any]:
+@tool
+def get_dashboard(days: int = 30) -> dict[str, Any]:
     """The IDP analytics dashboard for the last N days (0 = all time): KPI tiles and chart specs
     (submissions per day by source, by source, runs by status, top processes, file types, latest submissions)."""
     try:
@@ -362,8 +390,8 @@ async def get_dashboard(days: int = 30) -> dict[str, Any]:
 # --- overview ------------------------------------------------------------------
 
 
-@mcp.tool()
-async def get_database_overview(database: str = "", sample_size: int = 30) -> dict[str, Any]:
+@tool
+def get_database_overview(database: str = "", sample_size: int = 30) -> dict[str, Any]:
     """Structure of the whole database in one call: every collection with its
     document count and inferred fields/types, plus inferred relationships.
     Takes a while on large databases."""

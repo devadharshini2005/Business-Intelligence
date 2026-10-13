@@ -10,10 +10,9 @@ import { ThemeService } from './core/theme.service';
 import { Health, McpInfo } from './core/models';
 
 const NAV = [
-  { path: '/dashboard', label: 'Overview', icon: 'overview' },
+  { path: '/analytics', label: 'Analytics', icon: 'overview' },
   { path: '/submissions', label: 'Submissions', icon: 'inbox' },
   { path: '/chat', label: 'Ask AI', icon: 'spark' },
-  { path: '/catalog', label: 'Data catalog', icon: 'db' },
 ] as const;
 
 /**
@@ -64,7 +63,7 @@ export class App {
   ask(): void {
     const q = this.question().trim();
     if (!q) return;
-    this.chat.ask(q);
+    this.chat.ask(q, { fresh: true });
     this.question.set('');
     this.router.navigateByUrl('/chat');
   }

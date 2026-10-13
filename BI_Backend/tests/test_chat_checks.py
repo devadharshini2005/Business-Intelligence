@@ -19,10 +19,14 @@ def test_follow_ups_are_split_from_the_answer():
     assert split_follow_ups("No follow-ups.") == ("No follow-ups.", [])
 
 
-def test_figures_need_a_query_a_chart_and_a_breakdown():
+def test_figures_need_a_query_and_a_chart_that_shows_them():
     assert "queried nothing" in answer_problem("A total of 1,234 files.", [], [], [])
     assert "no chart" in answer_problem("A total of 86 files.", STEP, [], SRC)
-    assert "headline number" in answer_problem("A total of 86 files.", STEP, [KPI], SRC)
+    # a "how many" question is answered by its headline number alone
+    assert answer_problem("A total of 86 files.", STEP, [KPI], SRC) is None
+    # more figures than headline numbers need a breakdown that shows them
+    src = ['{"rows": [{"n": 86}, {"n": 50}, {"n": 36}]}']
+    assert "breakdown" in answer_problem("86 files: 50 by email and 36 by webhook.", STEP, [KPI], src)
     assert answer_problem("A total of 86 files.", STEP, [KPI, BARS], SRC) is None
     # ids, dates and follow-ups are not figures
     assert answer_problem("File 6aa1a6d2cc50abb434e6e57d came on 2026-09-09.\nFOLLOW_UPS: Top 5?", [], [], []) is None

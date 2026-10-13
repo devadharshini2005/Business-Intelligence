@@ -154,7 +154,14 @@ RATE_NAME = re.compile(r"rate|ratio|percent|share|confidence|accuracy", re.I)
 
 
 def as_percent(spec: dict[str, Any]) -> dict[str, Any]:
-    """A single rate-like series stored as 0-1 (e.g. 'Failure rate' 0.366) is shown as 36.6 %."""
+    """A single rate-like series stored as 0-1 (e.g. 'Failure rate' 0.366) is shown as 36.6 %.
+    The same for a kpi ('Avg confidence' 0.87 -> 87 %): confidence_score is stored as 0-1."""
+    if spec.get("type") == "kpi":
+        v = spec.get("value")
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1 \
+                and spec.get("unit") in (None, "", "%") and RATE_NAME.search(spec.get("title", "")):
+            return {**spec, "value": round(v * 100, 1), "unit": "%"}
+        return spec
     series = spec.get("series") or []
     if len(series) != 1 or spec.get("unit") not in (None, "", "%") \
             or not RATE_NAME.search(f"{series[0]['name']} {spec['title']}"):

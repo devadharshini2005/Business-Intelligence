@@ -24,19 +24,6 @@
   text-decoration: none;
 }
 
-.mark {
-  width: 24px;
-  height: 24px;
-  rect {
-    fill: var(--accent);
-  }
-  path {
-    fill: none;
-    stroke: var(--on-accent);
-    stroke-width: 2.4;
-    stroke-linecap: round;
-  }
-}
 
 .wordmark {
   display: flex;

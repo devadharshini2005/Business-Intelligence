@@ -11,6 +11,7 @@ AZURE_OPENAI_API_VERSION, AZURE_OPENAI_REASONING_EFFORT (low | medium | high).
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import os
@@ -29,6 +30,7 @@ API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
 REASONING = DEPLOYMENT.lower().startswith(("gpt-5", "o1", "o3", "o4"))  # no temperature; max_completion_tokens
 REASONING_EFFORT = os.getenv("AZURE_OPENAI_REASONING_EFFORT", "low")
 MAX_TURNS, MAX_CORRECTIONS, MAX_CHARTS, MAX_RESULT_CHARS = 15, 2, 4, 40_000
+TOOL_TIMEOUT_S = 90  # per MCP call; MongoDB itself caps an operation at 60 s (mongo_db.py timeoutMS)
 
 # MCP tools the chatbot may use (admin / heavy ones are left to Copilot).
 CHAT_TOOLS = {"list_collections", "infer_collection_schema", "get_distinct_values", "count_documents", "run_find",
@@ -60,13 +62,25 @@ Rules:
 - For one submission, file, run or step id call idp_get_submission first (any of these ids works), then
   idp_get_run_details for a run's steps; find_id tells what an unknown id is. These two idp tools attach a table
   themselves. If a submission record is reported deleted, say so and still describe its files and runs.
-Charts: answers with numbers MUST have charts from build_chart (they appear below your text). Make 2-3 charts that
-each show something different: a single number is a kpi PLUS breakdowns that explain it (trend per day/week, by
-status, by type, by source, top items). Types: line = over time (sort by date; $match the date field
+Analytics: numbers in your answer are shown with charts from build_chart (they appear below your text). Fit the
+charts to the QUESTION - different questions must look different. Pick the shape first:
+  how many / what is (one figure)  -> 1 kpi. Add 1 breakdown only if it answers an obvious "why".
+  trend / over time / per day       -> 1 line (or bar if < 8 points) as the main chart; optional kpi total first.
+  which / top / most / worst        -> 1 hbar sorted descending, top 10, highlight = the leader. No kpi.
+  share / split / mix / vs          -> 1 doughnut (<= 6 parts) or bar; series_field for side-by-side groups.
+  compare two periods or groups     -> bar with series_field, or 2 kpis (one per side).
+  list / show / latest / details    -> 1 table only.
+  explain / why / how does          -> charts only for the figures you cite; none if you cite none.
+Usually 1-2 charts, at most 3; never a chart that repeats another. Give every build_chart an `insight`: one short
+plain sentence with the takeaway ("Email brings in 3 of every 4 submissions"), and `highlight` the label that
+matters most when there is one. Titles in plain words a manager understands ("Failed runs by process", not
+"extraction_results grouped by proccess_id").
+Types: line = over time (sort by date; $match the date field
 {"$type": "date"}; per day "%Y-%m-%d" under ~2 months, per week "%G-W%V" under ~6, else per month - at least 5
 points), bar = categories, hbar = rankings / long labels, doughnut = parts of a whole (<= 6), kpi = one number,
 table = row detail. One line/bar per category: long rows {day, source, n} + series_field="source". Compare
-collections with $unionWith. Label with names, not ids: after grouping by proccess_id add {"$lookup": {"from":
+collections with $unionWith ($setWindowFields is not supported). Label with names, not ids: after grouping by
+proccess_id add {"$lookup": {"from":
 "processes", "localField": "_id", "foreignField": "_id", "as": "p"}}, {"$set": {"name": {"$ifNull": [{"$first":
 "$p.name"}, "Unknown / deleted process"]}}}. Confidence as % (x100, unit "%"). Never mix units in one chart.
 If a tool returns an error, fix the call and retry.
@@ -134,6 +148,14 @@ def is_empty(result: Any) -> bool:
     return not rows or zero_row
 
 
+def figures(text: str) -> set[str]:
+    """Distinct figures an answer states (ids, dates, periods and whole numbers <= 12 aside)."""
+    clean = _IDS_AND_DATES.sub(" ", text)
+    return {m.group().replace(",", "") for m in _NUMBER.finditer(clean)
+            if not _PERIOD.match(clean, m.end()) and not (float(m.group().replace(",", "")).is_integer()
+                                                         and float(m.group().replace(",", "")) <= 12)}
+
+
 def unverified_numbers(text: str, sources: list[str]) -> list[str]:
     """Figures in the answer that no tool result (or the question) contains, allowing for 1,234 formatting,
     rounding, 0.366 shown as 36.6% and a % of two results. Whole numbers <= 12 and periods are not checked."""
@@ -171,9 +193,9 @@ def answer_problem(text: str, steps: list[dict[str, Any]], charts: list[dict[str
     if thin:
         return (f"The trend '{thin[0]}' has fewer than 3 points. Make it per day or per week instead, with a title "
                 f"naming the grain; the old chart is removed automatically.")
-    if all(c["type"] == "kpi" for c in charts):
-        return ("Only a headline number is attached. Add 1-2 breakdown charts that explain it (trend over time, by "
-                "status, by type, by source or top items), then answer.")
+    if all(c["type"] == "kpi" for c in charts) and len(figures(text)) > len(charts):
+        return ("Your answer cites more figures than the headline numbers attached. Add one breakdown chart that "
+                "shows them (by status, type, source or top items), then answer.")
     bad = unverified_numbers(text, sources)
     if bad:
         return (f"These figures are not in any tool result: {', '.join(bad)}. Get every number from a query "
@@ -183,8 +205,13 @@ def answer_problem(text: str, steps: list[dict[str, Any]], charts: list[dict[str
 
 # --- agent -----------------------------------------------------------------------------------------------------
 async def call_tool(session: ClientSession, name: str, args: dict[str, Any]) -> tuple[Any, bool]:
-    """Call an MCP tool and return (result as JSON data, is_error)."""
-    res = await session.call_tool(name, args)
+    """Call an MCP tool and return (result as JSON data, is_error). A call that runs past TOOL_TIMEOUT_S is
+    reported as an error, so one stuck query can't hold up an endpoint or a chat answer indefinitely."""
+    try:
+        res = await asyncio.wait_for(session.call_tool(name, args), TOOL_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return (f"{name} timed out after {TOOL_TIMEOUT_S} s - narrow the query (a shorter period, a $match "
+                f"first, fewer rows)"), True
     text = "".join(c.text for c in res.content if getattr(c, "type", "") == "text")
     data = res.structuredContent
     if data is None:

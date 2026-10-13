@@ -75,3 +75,12 @@ def test_rates_already_labelled_percent_are_still_scaled():
     from charts import as_percent
     spec = as_percent(from_rows("Success rate by process", "bar", [{"p": "A", "r": 0.816}], "p", ["r"], unit="%"))
     assert spec["series"][0]["data"] == [81.6]
+
+
+def test_rate_kpi_stored_as_fraction_is_shown_as_percent():
+    from charts import as_percent
+    assert as_percent({"title": "Avg confidence", "type": "kpi", "value": 0.873}) == \
+        {"title": "Avg confidence", "type": "kpi", "value": 87.3, "unit": "%"}
+    # counts, values already in %, and non-rate titles are left alone
+    assert as_percent({"title": "Failed runs", "type": "kpi", "value": 1})["value"] == 1
+    assert as_percent({"title": "Avg confidence", "type": "kpi", "value": 87.3})["value"] == 87.3

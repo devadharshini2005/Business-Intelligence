@@ -85,3 +85,34 @@ def test_projection_and_sort():
 def test_bad_sort_rejected():
     with pytest.raises(QueryGuardError, match="1/-1"):
         parse_sort('{"createdAt": "desc"}')
+
+
+# --- Cosmos DB limits and misspelt stored fields ------------------------------------------------
+from query_guard import check_field_names, check_stages  # noqa: E402
+
+RUNS = "extraction_results"
+
+
+def test_unsupported_stage_is_rejected_with_a_hint():
+    with pytest.raises(QueryGuardError, match="does not support"):
+        check_stages([{"$setWindowFields": {"sortBy": {"d": 1}, "output": {}}}])
+    with pytest.raises(QueryGuardError):
+        check_stages([{"$facet": {"a": [{"$setWindowFields": {}}]}}])
+    check_stages([{"$match": {}}, {"$group": {"_id": "$status"}}])
+
+
+def test_corrected_spelling_of_a_stored_field_is_rejected():
+    for query in ({"process_id": "x"},
+                  [{"$group": {"_id": "$process_id", "n": {"$sum": 1}}}],
+                  [{"$lookup": {"from": "processes", "localField": "process_id", "foreignField": "_id", "as": "p"}}]):
+        with pytest.raises(QueryGuardError, match="proccess_id"):
+            check_field_names(RUNS, query)
+    with pytest.raises(QueryGuardError):
+        check_field_names(RUNS, {}, ["process_id"])  # get_distinct_values
+
+
+def test_stored_spelling_and_own_aliases_are_allowed():
+    check_field_names(RUNS, [{"$group": {"_id": "$proccess_id"}}])
+    check_field_names(RUNS, [{"$project": {"process_id": "$proccess_id"}}, {"$group": {"_id": "$process_id"}}])
+    check_field_names(RUNS, [{"$match": {"$expr": {"$eq": ["$_id", "$$process_id"]}}}])  # a $$ variable
+    check_field_names("processes", {"process_id": 1})  # other collections are not affected

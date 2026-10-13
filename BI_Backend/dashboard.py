@@ -15,6 +15,10 @@ from idp_flow import SOURCES, IdpFlow
 
 SOURCE_LABELS = {"email": "Email", "webhook": "Webhook", "manual_upload": "Manual upload"}
 
+# Users are in India; the database stores UTC. Day buckets use IST so "today" means today in India.
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30), "IST")
+IST_OFFSET = "+05:30"
+
 
 def _since(days: int) -> dt.datetime | None:
     return dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days) if days > 0 else None
@@ -64,15 +68,18 @@ class Dashboard:
         ]
 
     def submissions_over_time(self, days: int) -> dict[str, Any]:
+        """Per calendar day in India time: dates are stored in UTC, so a submission at 02:00 IST belongs to
+        that IST day, not to the previous UTC day."""
         days = days if days > 0 else 90
-        since = _since(days)
-        start = since.date()
+        start = dt.datetime.now(IST).date() - dt.timedelta(days=days)
+        since = dt.datetime.combine(start, dt.time.min, IST)  # IST midnight; pymongo sends it as UTC
         dates = [(start + dt.timedelta(days=i)).isoformat() for i in range(days + 1)]
         series = []
         for src, cfg in SOURCES.items():
             counts = {r["_id"]: r["n"] for r in self.db[cfg["collection"]].aggregate([
                 {"$match": {cfg["received"]: {"$gte": since}}},
-                {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": f"${cfg['received']}"}},
+                {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": f"${cfg['received']}",
+                                                      "timezone": IST_OFFSET}},
                             "n": {"$sum": 1}}},
             ])}
             series.append({"name": SOURCE_LABELS[src], "data": [counts.get(d, 0) for d in dates]})

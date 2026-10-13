@@ -102,7 +102,7 @@ export class SubmissionsPage {
   }
 
   askChat(q: string): void {
-    this.chat.ask(q);
+    this.chat.ask(q, { fresh: true });
     this.openSubmission.set(null);
     this.router.navigateByUrl('/chat');
   }

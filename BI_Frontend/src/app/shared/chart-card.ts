@@ -27,6 +27,11 @@ const TYPE_LABELS: Partial<Record<ChartType, string>> = {
   bar: 'Bars', hbar: 'Horizontal bars', line: 'Line', doughnut: 'Doughnut', pie: 'Pie',
 };
 
+/** The analysis a chart type answers, as the reader would name it. */
+const KIND: Partial<Record<ChartType, string>> = {
+  line: 'Trend', hbar: 'Ranking', bar: 'Comparison', doughnut: 'Share', pie: 'Share', table: 'Details',
+};
+
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
@@ -76,6 +81,10 @@ export class ChartCard {
   readonly askable = input(false);
   /** The MCP tool the spec came from, shown under the title. */
   readonly source = input('');
+  /** Chat answers: label the kind of analysis and add quick facts read off the chart's own data. */
+  readonly annotated = input(false);
+  /** The main chart of an answer: drawn taller. */
+  readonly hero = input(false);
   readonly ask = output<ChartSpec>();
   /** Fired with the row id when a table row that has one is clicked. */
   readonly rowClick = output<string>();
@@ -111,7 +120,70 @@ export class ChartCard {
   readonly plotHeight = computed(() => {
     const s = this.spec();
     if (this.expanded()) return Math.round(window.innerHeight * 0.62);
-    return this.type() === 'hbar' ? Math.max(180, (s.labels?.length ?? 0) * 30 + 40) : 260;
+    if (this.type() === 'hbar') return Math.max(180, (s.labels?.length ?? 0) * 30 + 40);
+    return this.hero() ? 320 : 260;
+  });
+
+  /** What kind of analysis this is, in a word - so a reader knows how to read it before looking. */
+  readonly kind = computed<string | null>(() => {
+    if (!this.annotated()) return null;
+    return KIND[this.spec().type] ?? null;
+  });
+
+  /**
+   * Two or three facts a reader would otherwise have to work out from the chart: the peak of a trend,
+   * the leader of a ranking, the largest share. Read straight off the chart's data, never estimated.
+   */
+  readonly facts = computed<{ label: string; value: string }[]>(() => {
+    if (!this.annotated() || !this.isPlot()) return [];
+    const s = this.spec();
+    const labels = s.labels ?? [];
+    const series = s.series ?? [];
+    const unit = this.unit();
+    const pct = s.unit === '%';
+    const fmt = (v: number) => v.toLocaleString(undefined, { maximumFractionDigits: 1 }) + unit;
+    const points = (data: (number | null)[]) =>
+      data.map((v, i) => ({ v, label: labels[i] })).filter((p): p is { v: number; label: string } => p.v !== null);
+
+    if (series.length !== 1) {
+      if (pct || this.spec().type !== 'line') return [];
+      // Several lines: which one carries the most.
+      const totals = series.map((x) => ({ name: x.name, t: points(x.data).reduce((a, p) => a + p.v, 0) }));
+      const top = [...totals].sort((a, b) => b.t - a.t)[0];
+      return top ? [{ label: 'Largest series', value: `${top.name} · ${fmt(top.t)}` }] : [];
+    }
+
+    const pts = points(series[0].data);
+    if (!pts.length) return [];
+    const total = pts.reduce((a, p) => a + p.v, 0);
+    const max = pts.reduce((a, p) => (p.v > a.v ? p : a));
+    const facts: { label: string; value: string }[] = [];
+
+    switch (this.spec().type) {
+      case 'line': {
+        const last = pts[pts.length - 1];
+        if (!pct) facts.push({ label: 'Total', value: fmt(total) });
+        else facts.push({ label: 'Average', value: fmt(total / pts.length) });
+        facts.push({ label: 'Peak', value: `${fmt(max.v)} · ${max.label}` });
+        facts.push({ label: 'Latest', value: `${fmt(last.v)} · ${last.label}` });
+        break;
+      }
+      case 'hbar':
+      case 'bar': {
+        const lead = s.highlight ? pts.find((p) => p.label === s.highlight) ?? max : max;
+        facts.push({ label: s.highlight ? 'Highlighted' : 'Highest', value: `${lead.label} · ${fmt(lead.v)}` });
+        if (!pct && total > 0) facts.push({ label: 'Share of total', value: `${Math.round((100 * lead.v) / total)}%` });
+        if (pts.length > 2) facts.push({ label: 'Items', value: String(pts.length) });
+        break;
+      }
+      case 'doughnut':
+      case 'pie': {
+        if (total > 0) facts.push({ label: 'Largest part', value: `${max.label} · ${Math.round((100 * max.v) / total)}%` });
+        if (!pct) facts.push({ label: 'Total', value: fmt(total) });
+        break;
+      }
+    }
+    return facts;
   });
 
   private chart?: Chart;
@@ -228,6 +300,9 @@ export class ChartCard {
       if (round) color = labels.map((_, j) => palette[j % palette.length]);
       else if (s.status_colors && series.length === 1 && type !== 'line')
         color = labels.map((l) => cssVar(statusVar(l) ?? '--series-1'));
+      else if (s.highlight && series.length === 1 && type !== 'line')
+        // The highlighted bar keeps full colour; the rest recede so the eye lands on it first.
+        color = labels.map((l) => (l === s.highlight ? palette[0] : palette[0] + '59'));
       return type === 'line'
         ? {
             label: ser.name, data: ser.data, borderColor: color, backgroundColor: color,

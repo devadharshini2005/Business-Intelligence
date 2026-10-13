@@ -385,6 +385,21 @@ button.primary {
   }
 }
 
+/* The application logo (public/Application_logo.png). Its line art is navy on a half-transparent white
+   background, so it always sits on a white tile - legible on the light and the dark theme alike. */
+img.app-logo {
+  flex: none;
+  display: block;
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  padding: 2px;
+  object-fit: contain;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
 svg.icon {
   flex: none;
   width: 15px;
@@ -428,7 +443,7 @@ svg.icon {
   }
 }
 
-/* --- data tables (submissions, catalog) ---------------------------------- */
+/* --- data tables (submissions) ---------------------------------- */
 table.grid {
   width: 100%;
   border-collapse: collapse;
