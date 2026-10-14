@@ -234,6 +234,35 @@
   min-width: 0;
 }
 
+@media (max-width: 600px) {
+  .conversation {
+    padding: 0 10px 10px;
+  }
+  .thread {
+    gap: 16px;
+    padding: 6px 0 12px;
+  }
+  .msg {
+    gap: 8px;
+  }
+  .msg.user .bubble {
+    max-width: 92%;
+  }
+  .msg.assistant .avatar {
+    width: 24px;
+    height: 24px;
+  }
+  .page-head h1 {
+    font-size: 15px;
+  }
+  .page-head .sub {
+    display: none;
+  }
+  .composer textarea {
+    font-size: 16px; /* below 16px iOS zooms into the field */
+  }
+}
+
 @media (max-width: 900px) {
   .history {
     position: absolute;
@@ -369,40 +398,6 @@
   height: 30px;
 }
 
-.md {
-  line-height: 1.6;
-  color: var(--text-primary);
-  max-width: 860px;
-
-  :first-child {
-    margin-top: 0;
-  }
-  :last-child {
-    margin-bottom: 0;
-  }
-  ul,
-  ol {
-    padding-left: 20px;
-  }
-  table {
-    border-collapse: collapse;
-    font-size: 13px;
-    margin: 8px 0;
-  }
-  th,
-  td {
-    border: 1px solid var(--grid);
-    padding: 4px 8px;
-    text-align: left;
-  }
-  code {
-    background: var(--surface-2);
-    padding: 1px 5px;
-    border-radius: 4px;
-    font-size: 12.5px;
-  }
-}
-
 /* --- live progress -------------------------------------------------------- */
 .progress {
   display: flex;
@@ -509,6 +504,25 @@
   cursor: pointer;
   &:hover {
     text-decoration: underline;
+  }
+}
+
+.link.excel {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  &:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  svg {
+    width: 13px;
+    height: 13px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
 }
 

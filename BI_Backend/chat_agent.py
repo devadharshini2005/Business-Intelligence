@@ -35,8 +35,9 @@ TOOL_TIMEOUT_S = 90  # per MCP call; MongoDB itself caps an operation at 60 s (m
 # MCP tools the chatbot may use (admin / heavy ones are left to Copilot).
 CHAT_TOOLS = {"list_collections", "infer_collection_schema", "get_distinct_values", "count_documents", "run_find",
               "run_aggregate", "find_fields_like", "get_inferred_relationships", "find_id", "idp_find_submissions",
-              "idp_get_submission", "idp_get_run_details", "build_chart"}
-DATA_TOOLS = {"run_aggregate", "run_find", "count_documents", "build_chart"}
+              "idp_get_submission", "idp_get_run_details", "idp_process_performance", "build_chart"}
+DATA_TOOLS = {"run_aggregate", "run_find", "count_documents", "build_chart", "idp_process_performance"}
+MAX_CUTOFF_RETRIES = 1  # an answer cut off by the token limit is asked for again, briefly
 
 SYSTEM_PROMPT = """You are the analytics assistant for Actuvara's IDP (intelligent document processing) platform. You answer
 questions about its MongoDB database with read-only tools. You cannot change data - if asked to, say so.
@@ -59,6 +60,10 @@ Rules:
 - Never invent ids. Find a process by name first: {"name": {"$regex": "<words>", "$options": "i"}} on processes,
   then filter extraction_results by proccess_id {"$oid": ...}. If nothing matches, list the available names.
 - If unsure of a field or value, check with infer_collection_schema / get_distinct_values first.
+- How processes perform - completion / success rate by process, submissions completed per process, or which
+  stage / node / step runs fail, wait or get stuck at: call idp_process_performance (one call, step names
+  already resolved; its table and stuck-steps ranking are attached for you - don't rebuild them). Never show raw
+  node ids or "(none)" as a label; a step's name is processes.workflow.nodes[].label.
 - For one submission, file, run or step id call idp_get_submission first (any of these ids works), then
   idp_get_run_details for a run's steps; find_id tells what an unknown id is. These two idp tools attach a table
   themselves. If a submission record is reported deleted, say so and still describe its files and runs.
@@ -71,6 +76,7 @@ charts to the QUESTION - different questions must look different. Pick the shape
   compare two periods or groups     -> bar with series_field, or 2 kpis (one per side).
   list / show / latest / details    -> 1 table only.
   explain / why / how does          -> charts only for the figures you cite; none if you cite none.
+If the user asks for a table, tabulation, list or breakdown "in a table", the main view MUST be type table.
 Usually 1-2 charts, at most 3; never a chart that repeats another. Give every build_chart an `insight`: one short
 plain sentence with the takeaway ("Email brings in 3 of every 4 submissions"), and `highlight` the label that
 matters most when there is one. Titles in plain words a manager understands ("Failed runs by process", not
@@ -85,6 +91,9 @@ proccess_id add {"$lookup": {"from":
 "$p.name"}, "Unknown / deleted process"]}}}. Confidence as % (x100, unit "%"). Never mix units in one chart.
 If a tool returns an error, fix the call and retry.
 Answer: the direct answer in 1-2 sentences, then short Markdown detail; read each value next to its own label.
+Don't repeat in the text what an attached table or chart already lists row by row - point out the 2-4 things that
+matter (best, worst, biggest bottleneck, anything surprising). Use plain words, never field names
+(say "completion %", not "submission_completion_pct").
 Last line, exactly: FOLLOW_UPS: <question> | <question> | <question>   (2-3 follow-ups answerable from this data)
 """
 
@@ -272,7 +281,7 @@ class ChatAgent:
         steps: list[dict[str, Any]] = []
         sources = [h["content"] for h in history if h["role"] == "user"]  # what figures are checked against
         known = ids_in([h["content"] for h in history])
-        corrections, text = 0, "I couldn't finish within the step limit - try a more specific question."
+        corrections, cutoffs, text = 0, 0, "I couldn't finish within the step limit - try a more specific question."
 
         def attach(spec: dict[str, Any], replaces: str = "") -> None:
             title = replaces or spec["title"]
@@ -283,7 +292,7 @@ class ChatAgent:
                 emit("chart", spec)
 
         for _ in range(MAX_TURNS):
-            kw = ({"max_completion_tokens": 16000, "reasoning_effort": REASONING_EFFORT} if REASONING
+            kw = ({"max_completion_tokens": 24000, "reasoning_effort": REASONING_EFFORT} if REASONING
                   else {"temperature": 0, "max_tokens": 8000})
             choice = (await self.llm.chat.completions.create(
                 model=DEPLOYMENT, messages=msgs, tools=await self.tools(), **kw)).choices[0]
@@ -291,6 +300,16 @@ class ChatAgent:
             if choice.finish_reason == "content_filter":
                 text = "I can't help with that request."
                 break
+            if not msg.tool_calls and choice.finish_reason == "length" and cutoffs < MAX_CUTOFF_RETRIES:
+                # Reasoning used up the output budget before the answer was written: ask again, short,
+                # from the results already gathered, instead of showing a broken answer.
+                cutoffs += 1
+                _log("answer cut off by the token limit - asking for a short answer")
+                msgs.append({"role": "system", "content": (
+                    "Your answer was cut off by the length limit. Write the final answer now from the results you "
+                    "already have - no more tool calls: the direct answer in 1-2 sentences, at most 6 short bullet "
+                    "points, then the FOLLOW_UPS line. The attached charts and tables show the detail.")})
+                continue
             if not msg.tool_calls:
                 text = msg.content or ""
                 problem = answer_problem(text, steps, charts, sources) if choice.finish_reason != "length" else None
@@ -326,7 +345,7 @@ class ChatAgent:
                     _log(f"{name} failed: {content[:200]}")
                 else:
                     sources.append(content)
-                    if name in ("idp_get_submission", "idp_get_run_details", "list_collections"):
+                    if name in ("idp_get_submission", "idp_get_run_details", "list_collections", "idp_process_performance"):
                         content += "\n(A table/chart of this result is attached to the answer automatically.)"
                 step = {"tool": name, "input": args, "ok": not error}
                 if name in DATA_TOOLS and not error:
@@ -353,6 +372,9 @@ class ChatAgent:
             attach(submission_table(result))
         elif name == "idp_get_run_details":
             attach(run_steps_table(result))
+        elif name == "idp_process_performance":
+            for spec in result.get("charts", []):
+                attach(spec)
         elif name == "list_collections":
             top = sorted(result["rows"], key=lambda r: -(r.get("approx_documents") or 0))[:15]
             attach({"title": "Collections in the database", "type": "kpi", "value": result["row_count"]})

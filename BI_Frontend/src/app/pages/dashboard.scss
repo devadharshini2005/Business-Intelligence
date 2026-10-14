@@ -2,22 +2,46 @@
   display: block;
 }
 
-.title {
-  align-self: center;
-  margin-left: 8px;
-  h1 {
-    font-size: 15px;
-  }
-  p {
-    margin: 2px 0 0;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
+.w-process {
+  width: 220px;
 }
 
 .updated {
   font-size: 12px;
   color: var(--text-muted);
+}
+
+.scope {
+  gap: 6px;
+  button {
+    padding: 0 2px;
+    border: 0;
+    background: none;
+    color: inherit;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+  }
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  transition: opacity 0.2s;
+}
+
+.notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--status-warning) 40%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--status-warning) 10%, transparent);
+  font-size: 13px;
 }
 
 .kpis {
@@ -26,31 +50,116 @@
   gap: 12px;
 }
 
+/* Three columns: wide panels span 2 or 3, the bottom pair splits evenly. */
 .grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 16px;
+  align-items: stretch;
 
-  .wide {
+  /* Every cell fills its row's height and hands it to its card, so panels side by side end level
+     (a card only as tall as its content left a gap under the shorter one). */
+  > * {
+    grid-column: span 2;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  > * > * {
+    flex: 1;
+  }
+  > .span-2 {
+    grid-column: span 4;
+  }
+  > .span-3 {
     grid-column: 1 / -1;
+  }
+  > .span-half {
+    grid-column: span 3;
   }
 }
 
-@media (max-width: 1000px) {
+/* Insights must not set the row's height (a long list stretched the pipeline card): the card is lifted
+   out of the flow so the row follows its neighbour, and the list scrolls inside it. */
+.grid > .insights-cell {
+  position: relative;
+  min-height: 300px;
+  > app-insights-panel {
+    position: absolute;
+    inset: 0;
+  }
+}
+
+/* Tablet: two columns - the wide panels take the full width, pairs stay side by side. */
+@media (max-width: 1100px) {
+  .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .grid > *,
+  .grid > .span-half {
+    grid-column: span 1;
+  }
+  .grid > .span-2,
+  .grid > .span-3,
+  .grid > .insights-cell {
+    grid-column: 1 / -1;
+  }
+  /* Stacked under the pipeline, insights get their own height, still scrolling past it. */
+  .grid > .insights-cell {
+    min-height: 0;
+    > app-insights-panel {
+      position: static;
+      max-height: 360px;
+    }
+  }
+}
+
+/* Phone: one column, tighter spacing, filters full width. */
+@media (max-width: 700px) {
   .grid {
     grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
   }
+  .grid > *,
+  .grid > .span-half {
+    grid-column: 1 / -1;
+  }
+  .kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .filter-bar {
+    .field {
+      flex: 1 1 140px;
+    }
+    .w-process,
+    select {
+      width: 100%;
+    }
+    .trail {
+      margin-left: 0;
+      flex-wrap: wrap;
+    }
+    .updated {
+      display: none;
+    }
+  }
+}
+
+.panel-error {
+  font-size: 13px;
+  color: var(--status-critical-text);
 }
 
 .dim {
   opacity: 0.55;
-  transition: opacity 0.2s;
 }
 
 .kpi-sk {
-  height: 78px;
+  height: 92px;
 }
 
-.chart-sk {
-  height: 300px;
+.updating {
+  font-size: 12px;
+  color: var(--text-muted);
 }

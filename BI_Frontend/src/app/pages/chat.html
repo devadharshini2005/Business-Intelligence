@@ -133,6 +133,11 @@
                 @if (last) { <button type="button" class="link" (click)="store.retry()">Retry</button> }
               } @else {
                 <button type="button" class="link" (click)="copy(m.content, i)">{{ copied() === i ? 'Copied' : 'Copy' }}</button>
+                <button type="button" class="link excel" (click)="downloadExcel(i)" [disabled]="exporting() === i"
+                        title="Download the answer, its charts' data and the queries as an Excel workbook">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14" /></svg>
+                  {{ exporting() === i ? 'Preparing…' : 'Excel' }}
+                </button>
                 @if (m.steps?.length) {
                   <details class="steps">
                     <summary>{{ m.steps!.length }} database {{ m.steps!.length === 1 ? 'step' : 'steps' }}</summary>

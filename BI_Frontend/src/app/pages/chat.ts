@@ -7,6 +7,7 @@ import { map } from 'rxjs';
 import { marked } from 'marked';
 
 import { ChatStore } from '../core/chat.store';
+import { downloadAnswerWorkbook } from '../core/excel';
 import { Conversation, ToolStep } from '../core/models';
 import { AnswerAnalytics } from '../shared/answer-analytics';
 
@@ -49,6 +50,7 @@ function describe(s: ToolStep): string {
     case 'idp_find_submissions': return 'Searched submissions';
     case 'idp_get_submission': return `Opened submission ${i['submission_id'] ?? ''}`;
     case 'idp_get_run_details': return `Opened run ${i['run_id'] ?? ''}`;
+    case 'idp_process_performance': return 'Checked completion and stuck steps for each process';
     case 'build_chart': return `Built the chart "${i['title'] ?? ''}"`;
     default: return s.tool;
   }
@@ -186,6 +188,23 @@ export class ChatPage implements AfterViewChecked {
       this.mdCache.set(text, html);
     }
     return html;
+  }
+
+  readonly exporting = signal<number | null>(null);
+
+  /** The answer at index i as an Excel workbook: question + answer, a sheet per chart/table, the queries. */
+  async downloadExcel(i: number): Promise<void> {
+    const msgs = this.store.messages();
+    const answer = msgs[i];
+    const question = [...msgs.slice(0, i)].reverse().find((m) => m.role === 'user')?.content ?? 'Question';
+    this.exporting.set(i);
+    try {
+      await downloadAnswerWorkbook(question, answer);
+    } catch (e) {
+      alert(`Could not create the Excel file: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      this.exporting.set(null);
+    }
   }
 
   copy(text: string, i: number): void {

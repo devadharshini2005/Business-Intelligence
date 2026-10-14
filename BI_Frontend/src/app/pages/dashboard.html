@@ -1,27 +1,48 @@
 <div class="filter-bar">
   <div class="field">
     <span>Period</span>
-    <div class="segmented" role="group" aria-label="Time range">
+    <div class="segmented" role="group" aria-label="Period">
       @for (r of ranges; track r.days) {
         <button type="button" [class.active]="days() === r.days" [attr.aria-pressed]="days() === r.days"
-                (click)="load(r.days)">{{ r.label }}</button>
+                (click)="setDays(r.days)">{{ r.label }}</button>
       }
     </div>
   </div>
 
-  <div class="title">
-    <h1>Analytics</h1>
-    <p>Intellidoc IDP · {{ rangeText() }}</p>
-  </div>
+  <label class="field">
+    <span>Source</span>
+    <select [ngModel]="source()" (ngModelChange)="setSource($event)">
+      <option value="">All sources</option>
+      @for (s of data()?.filters?.sources ?? []; track s.value) { <option [value]="s.value">{{ s.label }}</option> }
+    </select>
+  </label>
+
+  <label class="field">
+    <span>Process</span>
+    <select class="w-process" [ngModel]="process()" (ngModelChange)="setProcess($event)">
+      <option value="">All processes</option>
+      @for (p of data()?.filters?.processes ?? []; track p.value) {
+        <option [value]="p.value">{{ p.label }}{{ p.runs ? '' : ' (no runs)' }}</option>
+      }
+    </select>
+  </label>
 
   <div class="trail">
-    @if (data(); as d) {
-      <span class="updated num">Updated {{ d.generated_at | date: 'HH:mm' }}</span>
+    @if (processName(); as name) {
+      <span class="badge accent scope">Focused on {{ name }}
+        <button type="button" (click)="setProcess('')" aria-label="Show all processes">×</button>
+      </span>
     }
-    <span class="badge accent mono" title="Every tile and chart on this page comes from this MCP tool">MCP · get_dashboard</span>
-    <button class="ghost" type="button" (click)="load(days())" [disabled]="loading()">
-      <svg class="icon" [class.spin]="loading()" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" /></svg>
-      Refresh
+    @if (filtered()) {
+      <button class="ghost bare small" type="button" (click)="clearFilters()">Clear filters</button>
+    }
+    @if (data(); as d) {
+      <span class="updated num" [title]="'Generated ' + (d.generated_at | date: 'medium')">Updated {{ d.generated_at | date: 'HH:mm' }}</span>
+    }
+    <span class="badge accent mono" title="Every panel on this page comes from this MCP tool">MCP · get_dashboard</span>
+    @if (store.refreshing()) { <span class="updating">Updating…</span> }
+    <button class="ghost" type="button" (click)="refresh()" [disabled]="busy()" aria-label="Refresh" title="Fetch the latest data">
+      <svg class="icon" [class.spin]="busy()" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" /></svg>
     </button>
   </div>
 </div>
@@ -30,32 +51,81 @@
   @if (error()) {
     <div class="card">
       <div class="empty-state">
-        <strong>The dashboard could not be loaded</strong>
+        <strong>The analytics could not be loaded</strong>
         <p>{{ error() }}</p>
         <p>Nothing is shown in its place — this page only displays what the MCP server returns.</p>
-        <button class="primary" type="button" (click)="load(days())">Try again</button>
+        <button class="primary" type="button" (click)="refresh()">Try again</button>
       </div>
     </div>
   }
 
   @if (loading() && !data()) {
     <div class="kpis">@for (i of [1, 2, 3, 4, 5, 6, 7]; track i) { <div class="skeleton kpi-sk"></div> }</div>
-    <div class="grid">@for (i of [1, 2, 3, 4]; track i) { <div class="skeleton chart-sk"></div> }</div>
+    <div class="grid">
+      <div class="skeleton span-2" style="height: 260px"></div>
+      <div class="skeleton" style="height: 260px"></div>
+      <div class="skeleton span-3" style="height: 220px"></div>
+    </div>
   }
 
   @if (data(); as d) {
-    <div class="kpis" [class.dim]="loading()">
-      @for (k of d.kpis; track k.title) { <app-chart-card [spec]="k" /> }
-    </div>
-    @if (d.kpi_error) { <div class="banner error">KPIs: {{ d.kpi_error }}</div> }
-    @if (!d.days) { <p class="caveat">All time: there is no previous period to compare against, so tiles show totals only.</p> }
-
-    <div class="grid" [class.dim]="loading()">
-      @for (c of d.charts; track c.id) {
-        <app-chart-card [spec]="c" [askable]="true" source="get_dashboard" (ask)="askAbout($event)"
-                        (rowClick)="openSubmission.set($event)"
-                        [class.wide]="c.type === 'line' || c.type === 'table'" />
+    <div class="content" [class.dim]="loading()">
+      @if (empty()) {
+        <div class="notice">
+          <span>No runs in {{ rangeText() }}. The most recent activity was on
+            <strong>{{ d.latest_activity | date: 'd MMM yyyy' }}</strong>.</span>
+          <button class="ghost small" type="button" (click)="setDays(0)">Show all time</button>
+        </div>
       }
+
+      @if (d.kpis; as kpis) {
+        <div class="kpis">
+          @for (k of kpis; track k.key) { <app-kpi-tile [kpi]="k" (pick)="askKpi($event)" /> }
+        </div>
+        @if (!d.days) { <p class="caveat">All time: there is no previous period, so the tiles show no change.</p> }
+      } @else if (d.errors['kpis']) {
+        <div class="banner error">Headline figures: {{ d.errors['kpis'] }}</div>
+      }
+
+      <div class="grid">
+        <div class="span-2">
+          @if (d.pipeline; as p) { <app-pipeline-panel [pipeline]="p" /> }
+          @else { <div class="card panel-error">Pipeline: {{ d.errors['pipeline'] }}</div> }
+        </div>
+        <div class="insights-cell">
+          <app-insights-panel [insights]="d.insights" (ask)="askInsight($event)" />
+        </div>
+
+        <div class="span-3">
+          @if (d.processes; as rows) {
+            <app-process-scorecard [rows]="rows" [selected]="process()" (select)="setProcess($event)" />
+          } @else { <div class="card panel-error">Processes: {{ d.errors['processes'] }}</div> }
+        </div>
+
+        <div class="span-2">
+          @if (d.trend; as t) {
+            <app-chart-card [spec]="t" [askable]="true" source="get_dashboard" (ask)="askAbout($event)" />
+          } @else { <div class="card panel-error">Trend: {{ d.errors['trend'] }}</div> }
+        </div>
+        @if (d.by_source; as s) {
+          <app-chart-card [spec]="s" [askable]="true" source="get_dashboard" (ask)="askAbout($event)" />
+        } @else { <div class="card panel-error">Sources: {{ d.errors['by_source'] }}</div> }
+
+        <div class="span-half">
+          @if (d.bottlenecks; as b) { <app-bottlenecks-panel [items]="b" (select)="setProcess($event)" /> }
+          @else { <div class="card panel-error">Bottlenecks: {{ d.errors['bottlenecks'] }}</div> }
+        </div>
+        <div class="span-half">
+          @if (d.review_queue; as q) { <app-review-queue [items]="q" (open)="openSubmission.set($event)" /> }
+          @else { <div class="card panel-error">Review queue: {{ d.errors['review_queue'] }}</div> }
+        </div>
+
+        <div class="span-3">
+          @if (d.recent; as r) {
+            <app-chart-card [spec]="r" source="idp_find_submissions" (rowClick)="openSubmission.set($event)" />
+          } @else { <div class="card panel-error">Latest submissions: {{ d.errors['recent'] }}</div> }
+        </div>
+      </div>
     </div>
   }
 </div>

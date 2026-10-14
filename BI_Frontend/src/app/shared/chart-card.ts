@@ -297,7 +297,11 @@ export class ChartCard {
 
     const datasets = series.map((ser, i) => {
       let color: string | string[] = palette[i % palette.length];
-      if (round) color = labels.map((_, j) => palette[j % palette.length]);
+      // One series per status (e.g. runs per day by outcome): each takes its status colour. Rejected gets
+      // its own hue so it isn't confused with failed.
+      if (s.status_colors && series.length > 1)
+        color = cssVar(/reject/i.test(ser.name) ? '--series-5' : statusVar(ser.name) ?? SERIES_VARS[i % SERIES_VARS.length]);
+      else if (round) color = labels.map((_, j) => palette[j % palette.length]);
       else if (s.status_colors && series.length === 1 && type !== 'line')
         color = labels.map((l) => cssVar(statusVar(l) ?? '--series-1'));
       else if (s.highlight && series.length === 1 && type !== 'line')

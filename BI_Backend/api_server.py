@@ -4,7 +4,8 @@ launches mcp_server.py (the same read-only server Copilot uses) and calls its to
     python api_server.py        (= uvicorn api_server:app --reload --port 8000)
 
   GET  /api/health                 database reachable? chatbot configured?        (MCP: ping_db)
-  GET  /api/dashboard?days=30      KPI tiles + charts                              (MCP: get_dashboard)
+  GET  /api/dashboard?days=30&source=&process=
+                                   Analytics page panels                           (MCP: get_dashboard)
   GET  /api/mcp                    MCP server, transport and tool list for the source panel (MCP: list_tools,
                                    server_info)
   GET  /api/submissions?source=&status=&search=&days=&limit=
@@ -84,8 +85,8 @@ async def health() -> dict:
 
 
 @app.get("/api/dashboard")
-async def dashboard(days: int = Query(30, ge=0, le=3650)) -> dict:
-    return await mcp_tool("get_dashboard", {"days": days})
+async def dashboard(days: int = Query(30, ge=0, le=3650), source: str = "", process: str = "") -> dict:
+    return await mcp_tool("get_dashboard", {"days": days, "source": source, "process": process})
 
 
 @app.get("/api/mcp")

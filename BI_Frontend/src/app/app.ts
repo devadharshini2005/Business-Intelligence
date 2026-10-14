@@ -11,7 +11,6 @@ import { Health, McpInfo } from './core/models';
 
 const NAV = [
   { path: '/analytics', label: 'Analytics', icon: 'overview' },
-  { path: '/submissions', label: 'Submissions', icon: 'inbox' },
   { path: '/chat', label: 'Ask AI', icon: 'spark' },
 ] as const;
 

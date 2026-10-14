@@ -8,25 +8,15 @@ import {
   ChatMessage,
   ChatResponse,
   DashboardData,
-  Envelope,
   Health,
   McpInfo,
   Submission,
-  SubmissionRow,
   ToolStep,
 } from './models';
 
 export interface ChatStreamHandlers {
   step: (step: ToolStep) => void;
   chart: (chart: ChartSpec) => void;
-}
-
-export interface SubmissionQuery {
-  source?: string;
-  status?: string;
-  search?: string;
-  days?: number;
-  limit?: number;
 }
 
 /**
@@ -47,14 +37,8 @@ export class ApiService {
     return this.get('list_tools', '/api/mcp');
   }
 
-  dashboard(days: number): Observable<DashboardData> {
-    return this.get('get_dashboard', '/api/dashboard', { days });
-  }
-
-  submissions(q: SubmissionQuery): Observable<Envelope<SubmissionRow>> {
-    const params: Record<string, string | number> = {};
-    for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== '') params[k] = v;
-    return this.get('idp_find_submissions', '/api/submissions', params);
+  dashboard(days: number, source = '', process = ''): Observable<DashboardData> {
+    return this.get('get_dashboard', '/api/dashboard', { days, source, process });
   }
 
   submission(id: string): Observable<Submission> {

@@ -28,7 +28,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from charts import as_percent, from_rows, split_mixed_scales  # noqa: E402
-from dashboard import Dashboard  # noqa: E402
+from dashboard import Dashboard, process_performance  # noqa: E402
 from idp_flow import IdpFlow  # noqa: E402
 from mongo_db import MongoMetadataClient  # noqa: E402
 from query_guard import QueryGuardError  # noqa: E402
@@ -338,6 +338,21 @@ def idp_get_run_details(
         return _err(ex)
 
 
+@tool
+def idp_process_performance(days: int = 0, source: str = "", process: str = "") -> dict[str, Any]:
+    """Completion per process and where runs stop, in one call - use it for any question about how
+    processes perform, completion / success rates by process, or which workflow stage/node/step runs fail,
+    wait or get stuck at. Per process: submissions it ran on and how many have a completed run (%), runs
+    and how many completed (%), awaiting review, failed, rejected, confidence, time. Stuck steps carry
+    their real step names (from the workflow), never node ids. days: last N days (0 = all time);
+    source: email | webhook | manual_upload; process: a process _id. Attaches a table per process and a
+    ranking of stuck steps automatically."""
+    try:
+        return process_performance(_db().database(), days, source, process)
+    except Exception as ex:
+        return _err(ex)
+
+
 # --- analytics -------------------------------------------------------------------
 @tool
 def find_id(id: str, database: str = "") -> dict[str, Any]:
@@ -378,11 +393,14 @@ def build_chart(
 
 
 @tool
-def get_dashboard(days: int = 30) -> dict[str, Any]:
-    """The IDP analytics dashboard for the last N days (0 = all time): KPI tiles and chart specs
-    (submissions per day by source, by source, runs by status, top processes, file types, latest submissions)."""
+def get_dashboard(days: int = 30, source: str = "", process: str = "") -> dict[str, Any]:
+    """The IDP analytics page for the last N days (0 = all time), optionally for one source
+    (email | webhook | manual_upload) and/or one process (its _id): KPIs with sparklines and change vs the
+    previous period, the document pipeline and where documents stop, a scorecard per process, runs per day
+    by outcome, bottleneck workflow steps, the review queue, submissions by source, latest submissions and
+    templated insights."""
     try:
-        return Dashboard(_db().database()).build(days)
+        return Dashboard(_db().database()).build(days, source, process)
     except Exception as ex:
         return _err(ex)
 
